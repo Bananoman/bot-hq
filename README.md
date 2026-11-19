@@ -13,7 +13,9 @@
   <a href="#install-on-the-computer">Install</a> ·
   <a href="#run-it-locally">Run locally</a> ·
   <a href="docs/ARCHITECTURE.md">Architecture</a> ·
-  <a href="#status-and-limits">Limits</a>
+  <a href="#status-and-limits">Limits</a> ·
+  <a href="SECURITY.md">Security</a> ·
+  <a href="#disclaimer">Disclaimer</a>
 </p>
 
 <p align="center">
@@ -25,7 +27,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/chat-dark.png">
-    <img src="assets/screenshots/chat-light.png" alt="A chat with a bot. The bot's steps are listed while it works, its screen is live in the side panel, and the Engine panel shows its model." width="100%">
+    <img src="assets/screenshots/chat-light.png" alt="A chat with a bot. The bot's steps are listed while it works, and the side panel shows its screen, routines, model and voice settings." width="100%">
   </picture>
 </p>
 
@@ -33,7 +35,9 @@
 
 Give a bot a job, connect the apps it needs, and follow its work in chat. Each bot has a name, a look, its own memory, and a screen you can watch or take over. Bots can message each other, run recurring tasks, and talk with you over voice.
 
-The interface is modeled on Grok Bot. Underneath, every bot is a Hermes agent, so it can run on the model subscriptions you already pay for (Claude, ChatGPT, Grok and others) or on API keys.
+Every bot is a Hermes agent, so it can run on the model subscriptions you already pay for (Claude, ChatGPT, Grok and others) or on API keys.
+
+> Bot HQ is an independent, unofficial open-source project. It is not affiliated with, endorsed by or sponsored by xAI, Nous Research, Composio or the other third-party companies named here. See the [disclaimer](#disclaimer).
 
 ## What you get
 
@@ -48,18 +52,8 @@ The interface is modeled on Grok Bot. Underneath, every bot is a Hermes agent, s
 | **Research on X** | Every bot has an `x_search` tool, backed by xAI. |
 | **Routines, tasks and a Library** | Recurring jobs on a schedule, a task list per bot, and a place where bots save the files they make. |
 
-<table>
-  <tr>
-    <td width="50%"><img src="assets/screenshots/viewer.png" alt="The full-size viewer showing a bot's Chrome window, live."></td>
-    <td width="50%"><img src="assets/screenshots/home-screen.jpg" alt="A bot's home screen: clock, the bot's name and role, and its apps."></td>
-  </tr>
-  <tr>
-    <td align="center"><sub>Watching a bot's screen live</sub></td>
-    <td align="center"><sub>Each screen is dressed as that bot's own computer</sub></td>
-  </tr>
-</table>
 
-<sub>The chat screenshot at the top uses the sample data built into the dev server (add <code>?fixtures</code> to the URL). The two above are from a running install.</sub>
+<sub>The screenshot at the top shows the sample data built into the dev server (add <code>?fixtures</code> to the URL).</sub>
 
 ## How it fits together
 
@@ -125,12 +119,19 @@ On the computer:
 python3 /opt/hq/hq-screen.py undress 99                      # main screen back to how it was (99 = its X display)
 python3 /opt/hq/app/scripts/add-hq-to-hermes.py --remove     # take the tools out of Hermes
 supervisorctl stop hq-app && supervisorctl remove hq-app
-rm -rf /etc/supervisor/conf.d/hq-app.conf /opt/hq /var/log/hq /root/grokbot /etc/opt/chrome/policies/managed/hq.json
+rm -rf /etc/supervisor/conf.d/hq-app.conf /opt/hq /var/log/hq /root/bothq /root/grokbot /etc/opt/chrome/policies/managed/hq.json
 ```
 
 Then delete the public URL in Orgo. Screens of the other bots are released when you delete those bots in the app.
 
 </details>
+
+## Upgrading
+
+Run the install script again with a newer `hq-app.tgz`; settings and data are kept. Two things to know when coming from an older version:
+
+- **Sign-in is stricter.** The server refuses to start with the example `SESSION_SECRET`. On a public URL only addresses in `ALLOWED_EMAILS` can sign in (an empty list lets no new account in), and `DEV_LOGIN` only works on `localhost`. `scripts/sign-in-link.sh` still signs anyone in from the computer itself.
+- **The project used to be called "Grokbot".** Old names keep working: `GROKBOT_*` environment variables are read when the `BOTHQ_*` ones are unset, an existing `data/grokbot.db` stays the default database, a computer that has `/root/grokbot` keeps using it for browser profiles and Library files, and old sign-in cookies and browser settings are still read.
 
 ## Run it locally
 
@@ -145,7 +146,7 @@ npm run dev -w server     # API on :8787
 npm run dev -w web        # app on :5173
 ```
 
-With `HQ_LOCAL=0` the server reaches the computer through the Orgo API instead of running commands on it, which is enough for development. `DEV_LOGIN=1` enables the email-only sign-in form; never set it on a public address.
+With `HQ_LOCAL=0` the server reaches the computer through the Orgo API instead of running commands on it, which is enough for development. `DEV_LOGIN=1` enables the email-only sign-in form; it only works while `APP_URL` is a `localhost` address, and only for requests from the same machine. Before you put the app on a public URL, read [SECURITY.md](SECURITY.md).
 
 `npm run build && npm start` serves the built app from the API port.
 
@@ -156,7 +157,7 @@ The keys you need:
 | `ORGO_API_KEY`, `ORGO_COMPUTER_ID` | The computer and its screens |
 | `COMPOSIO_API_KEY` | Connected apps |
 | `XAI_API_KEY` | Voice and `x_search` |
-| `SESSION_SECRET` | Sign-in sessions and the tokens agents use to reach `/mcp` |
+| `SESSION_SECRET` | Sign-in sessions and the tokens agents use to reach `/mcp`. Use a long random value (`openssl rand -hex 32`); the server refuses the placeholder |
 
 ## Models and subscriptions
 
@@ -167,7 +168,7 @@ Open a bot's details panel, **Engine**. Pick a provider and model there. **Sign 
 ```bash
 npm run typecheck       # server and web
 npm run build
-node tests/e2e.mjs https://<your-url>    # needs DEV_LOGIN=1, or E2E_SESSION=<session cookie>
+node tests/e2e.mjs https://<your-url>    # needs E2E_SESSION=<session cookie> (DEV_LOGIN=1 works only against localhost)
 ```
 
 The e2e suite creates a temporary bot (with its own Hermes gateway and screen), exercises chat, the browser on its screen, the live viewer, connected apps, voice sessions and settings, then deletes it. It calls real providers.
@@ -183,14 +184,20 @@ docs/               architecture; the Orgo and xAI/Composio guides predate the H
 
 ## Status and limits
 
-- Experimental, no security audit. Bots share one computer and can reach each other's files there.
+- Experimental. Bots share one computer, run as root and can reach each other's files there. Read [SECURITY.md](SECURITY.md) before deploying.
 - Approval cards cover Composio write actions. What a bot does through its browser or shell is not gated, and Hermes' own "risky command" prompts are not shown in the app yet.
 - Four bots at most, because of Orgo's four-screen limit.
-- The app still calls itself "Grokbot" in places (page title, package names, the database file).
 - The screen look is an original implementation inspired by OrgoAI/bops; no code or assets from that repository are used.
 
 ## License and credits
 
-Project code is available under the [MIT license](LICENSE). The bot artwork and some icons come from Grok Bot's design and remain the property of their owners, as do third-party app logos; the MIT license does not cover them. See [third-party notices](THIRD_PARTY_NOTICES.md).
+Available under the [MIT license](LICENSE). The bot characters, icons and screenshots in this repository were made for the project (icons from [Lucide](https://lucide.dev)); app logos are loaded at runtime and belong to their owners. See [third-party notices](THIRD_PARTY_NOTICES.md).
 
-Continued from [grokbot-clone](https://github.com/nickvasilescu/grokbot-clone). Built with [Hermes Agent](https://github.com/NousResearch/hermes-agent), [Orgo](https://orgo.ai), [Composio](https://composio.dev), and [xAI](https://x.ai). This is an independent project, unaffiliated with xAI, Cursor/Anysphere or Nous Research.
+Bot HQ grew out of [Orgo Teammates](https://github.com/nickvasilescu/orgo-teammates). Built with [Hermes Agent](https://github.com/NousResearch/hermes-agent) (MIT), [Orgo](https://orgo.ai), [Composio](https://composio.dev), and the [xAI API](https://x.ai).
+
+## Disclaimer
+
+- **Independent and unofficial.** Bot HQ is an independent open-source project. It is not affiliated with, endorsed by or sponsored by xAI, X Corp, SpaceX, Meta, OpenAI, Anthropic, Google, Cursor/Anysphere, Nous Research, Composio, or any other company or product named in this repository, apart from Orgo (Organic Intelligence, Inc.), which the author co-founded. Third-party names are trademarks of their respective owners and are used only to describe compatibility. Hermes Agent is used under its MIT license.
+- **Written from scratch.** This project was written from scratch and contains no code, assets, prompts or other material from xAI's products. It talks only to public, documented APIs, using your own keys.
+- **Educational and experimental.** It is provided "as is", without warranty of any kind, under the [MIT license](LICENSE). Expect bugs and breaking changes.
+- **You are responsible for how you use it.** That includes your API keys and the costs they incur, complying with the terms of service of every provider you connect (model providers, Orgo, Composio, X and the apps your bots use) and with applicable law, and supervising agents that act on real accounts. Bots can send messages, spend money and change data on your behalf.
