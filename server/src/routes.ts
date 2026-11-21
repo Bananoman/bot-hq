@@ -175,10 +175,13 @@ api.get('/auth/link/:token', (c) => {
 
 api.post('/auth/logout', (c) => { destroySession(c); return c.json({ ok: true }); });
 
-// everything below requires a session
+// Everything below requires a session, except the page a provider sends the browser back to after
+// connecting an app. Only that exact GET is let through: as a prefix it also covered other routes
+// that happen to start the same way (DELETE /api/apps/callback is "disconnect the app `callback`").
+// Every route under /api/auth/ is defined above and is meant to work signed out.
 api.use('/*', async (c, next) => {
-  if (c.req.path.startsWith('/api/auth/') || c.req.path.startsWith('/api/apps/callback') || c.req.path === '/api/health') return next();
-  return requireUser(c, next);
+  const open = c.req.path.startsWith('/api/auth/') || (c.req.method === 'GET' && c.req.path === '/api/apps/callback') || c.req.path === '/api/health';
+  return open ? next() : requireUser(c, next);
 });
 
 // ---------- events (SSE) ----------

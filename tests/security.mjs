@@ -307,6 +307,24 @@ try {
     eq(composio.deleted.length, composio.links.length - 1, 'deleted connections');
     eq(composio.other.join(', '), '', 'unexpected Composio calls');
   });
+
+  // ---------- D: only the exact app-connection callback skips the session check ----------
+
+  await step('signed out: routes that merely start like the callback need a session', async () => {
+    eq((await req('/api/apps/callback', { method: 'DELETE' })).status, 401, 'DELETE /api/apps/callback');
+    eq((await req('/api/apps/callback', { body: {} })).status, 401, 'POST /api/apps/callback');
+    eq((await req('/api/apps/callback/connect', { body: {} })).status, 401, 'POST /api/apps/callback/connect');
+    eq((await req('/api/apps/callbackx?slug=gmail')).status, 401, 'GET /api/apps/callbackx');
+    eq((await req('/api/apps/callback/x?slug=gmail')).status, 401, 'GET /api/apps/callback/x');
+  });
+  await step('signed out: the callback itself and the sign-in routes still answer', async () => {
+    const page = await req('/api/apps/callback?slug=gmail');
+    eq(page.status, 200, 'GET /api/apps/callback');
+    if (!(await page.text()).includes('bothq-connected')) throw new Error('the callback page lost its script');
+    eq((await req('/api/auth/me')).status, 200, 'GET /api/auth/me');
+    eq((await req('/api/auth/logout', { body: {} })).status, 200, 'POST /api/auth/logout');
+    eq((await req('/api/health')).status, 200, 'GET /api/health');
+  });
 } finally {
   await stop();
   composioServer.close();
