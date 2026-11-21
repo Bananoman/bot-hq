@@ -607,6 +607,39 @@ try {
     eq(await engineOf(cookies.stale, await agentBot(cookies.stale)), 'primary', 'the first account\'s bot');
     if (log.includes('[engine] The computer\'s own agent') || log.includes('OWNER_EMAIL is not set')) throw new Error('a warning was logged for a local app');
   });
+
+  // ---------- K: sign-in attempts are limited per address ----------
+
+  // On every interface where there is a second address, so a request can also arrive from "somewhere else".
+  await start({ ...LOCAL, HOST: LAN ? '0.0.0.0' : '127.0.0.1' });
+  const wrongKey = { authorization: `Bearer ${hmac('not-the-owner-key')}` };
+  await step('Google sign-in: ten starts from one address, then 429; another address is counted on its own', async () => {
+    for (let i = 1; i <= 10; i++) eq((await req('/api/auth/google/start')).status, 302, `start ${i}`);
+    const over = await req('/api/auth/google/start');
+    eq(over.status, 429, 'start 11');
+    if (!(Number(over.headers.get('retry-after')) > 0)) throw new Error(`Retry-After: ${over.headers.get('retry-after')}`);
+    if (LAN) eq((await req('/api/auth/google/start', { base: LAN })).status, 302, 'a start from the other address');
+  });
+  await step('dev sign-in: refused when passed on by a proxy, limited to ten from one address', async () => {
+    eq((await req('/api/auth/dev', { headers: { 'x-forwarded-for': '203.0.113.9' }, body: { email: STALE } })).status, 403, 'with X-Forwarded-For');
+    if (LAN) eq((await req('/api/auth/dev', { base: LAN, body: { email: STALE } })).status, 403, 'from the other address');
+    for (let i = 1; i <= 10; i++) eq((await req('/api/auth/dev', { body: { email: STALE } })).status, 200, `sign-in ${i}`);
+    eq((await req('/api/auth/dev', { body: { email: STALE } })).status, 429, 'sign-in 11');
+  });
+  let goodLink;
+  await step('sign-in links: five bad links from one address, then 429, and a good link is not used up by that', async () => {
+    goodLink = new URL((await (await req('/api/auth/owner', { headers: asOwner, body: { email: GUEST, link: true } })).json()).url).pathname;
+    for (let i = 1; i <= 5; i++) eq((await req(`/api/auth/link/no-such-link-${i}`)).status, 410, `bad link ${i}`);
+    eq((await req('/api/auth/link/no-such-link-6')).status, 429, 'bad link 6');
+    eq((await req(goodLink)).status, 429, 'the good link from the same address');
+    if (LAN) eq(await me(sessionOf(await req(goodLink, { base: LAN }))), GUEST, 'the good link from the other address');
+  });
+  await step('owner key: wrong keys from elsewhere are not counted; five from this machine close it for a while', async () => {
+    for (let i = 1; i <= 8; i++) eq((await req('/api/auth/owner', { headers: { ...wrongKey, 'x-forwarded-for': '203.0.113.9' }, body: { email: GUEST } })).status, 403, `forwarded wrong key ${i}`);
+    eq((await req('/api/auth/owner', { headers: asOwner, body: { email: GUEST } })).status, 200, 'right key after those');
+    for (let i = 1; i <= 5; i++) eq((await req('/api/auth/owner', { headers: wrongKey, body: { email: GUEST } })).status, 403, `wrong key ${i}`);
+    eq((await req('/api/auth/owner', { headers: asOwner, body: { email: GUEST } })).status, 429, 'right key after five wrong ones');
+  });
 } finally {
   await stop();
   composioServer.close();

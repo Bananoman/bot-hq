@@ -94,6 +94,38 @@ export function isLoopbackAddress(addr: string | undefined): boolean {
   return a === '::1' || /^127\.\d+\.\d+\.\d+$/.test(a);
 }
 
+/** The socket peer of a request, with an IPv4-mapped address in its plain form. */
+export function peerAddress(c: Context): string {
+  return (getConnInfo(c).remote.address ?? 'unknown').replace(/^::ffff:/i, '');
+}
+
+/**
+ * A small in-memory limit on how often something may happen per key, here per socket peer address:
+ * at most `max` times in any `windowMs`. It lives in this process (a restart forgets it) and holds
+ * a few timestamps per address.
+ *
+ * The peer address is used, never a forwarding header, which the caller could write. So behind a
+ * proxy that connects from one address (a public URL forwarder) all visitors share one count and
+ * the limit is a limit for everyone together: it still caps what abuse can cost, at the price that
+ * a flood from one visitor can use up the allowance of the others until the window has passed.
+ */
+export function rateLimit(max: number, windowMs: number) {
+  const seen = new Map<string, number[]>();
+  const recent = (key: string) => (seen.get(key) ?? []).filter((t) => t > now() - windowMs);
+  return {
+    /** Whether `key` has used up its allowance (nothing is counted). */
+    full: (key: string) => recent(key).length >= max,
+    /** Count one more for `key`. */
+    count(key: string) {
+      // Addresses that have gone quiet are dropped now and then, so the map cannot grow without end.
+      if (seen.size > 5000) for (const k of seen.keys()) if (!recent(k).length) seen.delete(k);
+      seen.set(key, [...recent(key), now()]);
+    },
+    /** Seconds until `key` may try again (for Retry-After). */
+    retryAfter: (key: string) => Math.max(1, Math.ceil(((recent(key)[0] ?? now()) + windowMs - now()) / 1000)),
+  };
+}
+
 /** Headers a proxy adds when it passes a request on. A program calling from this machine sends none of them. */
 const FORWARDING_HEADERS = ['forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-real-ip', 'via'];
 
@@ -107,7 +139,7 @@ const FORWARDING_HEADERS = ['forwarded', 'x-forwarded-for', 'x-forwarded-host', 
  */
 export function isLocalRequest(c: Context): boolean {
   if (FORWARDING_HEADERS.some((h) => c.req.header(h) !== undefined)) return false;
-  return isLoopbackAddress(getConnInfo(c).remote.address);
+  return isLoopbackAddress(peerAddress(c));
 }
 
 /**

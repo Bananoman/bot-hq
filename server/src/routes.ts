@@ -1,12 +1,11 @@
 import crypto from 'node:crypto';
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { db, now } from './db.js';
 import { env } from './env.js';
 import { newId } from './lib/ids.js';
 import { hub } from './lib/hub.js';
-import { getConnInfo } from '@hono/node-server/conninfo';
-import { createSession, destroySession, isLocalRequest, isLoopbackAddress, isOwnerKey, requireUser, userFromCookieHeader, type AuthVars } from './lib/auth.js';
+import { createSession, destroySession, isLocalRequest, isOwnerKey, peerAddress, rateLimit, requireUser, userFromCookieHeader, type AuthVars } from './lib/auth.js';
 import { allLive, appendRow, clearConversation, emitBot, getBot, getBotRow, getRow, listBots, listRoutines, listRows, listTasks, toRoutine, updateRow } from './store.js';
 import { enqueue, interrupt, resolveApproval } from './agent/loop.js';
 import { computerState, ensureComputer, forgetBotFiles, readyScreen, refreshComputer, releaseScreen, suspendComputer } from './computer.js';
@@ -89,7 +88,24 @@ api.get('/auth/me', (c) => {
 /** How long a Google sign-in may take from start to callback. */
 const LOGIN_ATTEMPT_TTL_MS = 15 * 60_000;
 
+// Limits on the sign-in routes, each counted per peer address (see rateLimit for what that means
+// behind a proxy). Starting a sign-in costs something every time (a Composio session and a
+// database row for Google, possibly a new account with an agent of its own for the dev form), so
+// starts are capped. For the owner key and sign-in links it is the wrong guesses that are capped.
+const TEN_MINUTES = 10 * 60_000;
+const googleStarts = rateLimit(10, TEN_MINUTES);
+const devSignIns = rateLimit(10, TEN_MINUTES);
+const ownerFailures = rateLimit(5, TEN_MINUTES);
+const linkFailures = rateLimit(5, TEN_MINUTES);
+const tooMany = (c: Context, limit: ReturnType<typeof rateLimit>, peer: string) => {
+  c.header('Retry-After', String(limit.retryAfter(peer)));
+  return c.text('Too many sign-in attempts from this address. Try again in a few minutes.', 429);
+};
+
 api.get('/auth/google/start', async (c) => {
+  const peer = peerAddress(c);
+  if (googleStarts.full(peer)) return tooMany(c, googleStarts, peer);
+  googleStarts.count(peer);
   // Attempts nobody finished would otherwise stay forever (anyone can open this route). Past the
   // time limit the callback refuses them anyway, so they are dropped whenever a new one begins.
   db.prepare('DELETE FROM login_attempts WHERE created_at < ?').run(now() - LOGIN_ATTEMPT_TTL_MS);
@@ -133,8 +149,12 @@ api.get('/auth/google/callback', async (c) => {
 
 api.post('/auth/dev', async (c) => {
   // Email-only sign-in proves nothing about who is asking, so it only works for a local app and
-  // only for requests from this machine (not, say, from the LAN when the server listens there).
-  if (!env.devLogin || !isLoopbackAddress(getConnInfo(c).remote.address)) return c.json({ error: 'disabled' }, 403);
+  // only for requests made on this machine: not from the LAN when the server listens there, and not
+  // passed on by a tunnel or proxy that says so (see isLocalRequest).
+  if (!env.devLogin || !isLocalRequest(c)) return c.json({ error: 'disabled' }, 403);
+  const peer = peerAddress(c);
+  if (devSignIns.full(peer)) return tooMany(c, devSignIns, peer);
+  devSignIns.count(peer);
   const { email, name } = await c.req.json<{ email: string; name?: string }>();
   if (!email?.includes('@')) return c.json({ error: 'email required' }, 400);
   try {
@@ -153,7 +173,16 @@ const signInLinks = new Map<string, { userId: string; expires: number }>();
 // and the request has to come from the machine too, so nobody elsewhere gets to try keys (see isLocalRequest).
 // With `link`, it answers with a link that signs one browser in, once (scripts/sign-in-link.sh).
 api.post('/auth/owner', async (c) => {
-  if (!isLocalRequest(c) || !isOwnerKey((c.req.header('authorization') ?? '').replace(/^Bearer\s+/i, ''))) return c.json({ error: 'forbidden' }, 403);
+  // A request from elsewhere is refused whatever key it carries, so it is not counted either: junk
+  // sent through the public URL cannot use up the allowance of the script on this machine. Wrong
+  // keys from this machine are counted, and past the limit no key is looked at until it has eased.
+  if (!isLocalRequest(c)) return c.json({ error: 'forbidden' }, 403);
+  const peer = peerAddress(c);
+  if (ownerFailures.full(peer)) return tooMany(c, ownerFailures, peer);
+  if (!isOwnerKey((c.req.header('authorization') ?? '').replace(/^Bearer\s+/i, ''))) {
+    ownerFailures.count(peer);
+    return c.json({ error: 'forbidden' }, 403);
+  }
   const { email, name, link } = await c.req.json<{ email: string; name?: string; link?: boolean }>();
   if (!email?.includes('@')) return c.json({ error: 'email required' }, 400);
   try {
@@ -171,10 +200,16 @@ api.post('/auth/owner', async (c) => {
 });
 
 api.get('/auth/link/:token', (c) => {
+  // Checked before the link is looked at, so a refused request does not use a link up.
+  const peer = peerAddress(c);
+  if (linkFailures.full(peer)) return tooMany(c, linkFailures, peer);
   const token = c.req.param('token');
   const l = signInLinks.get(token);
   signInLinks.delete(token);
-  if (!l || l.expires < Date.now()) return c.text('This sign-in link was already used or has expired. Ask for a new one.', 410);
+  if (!l || l.expires < Date.now()) {
+    linkFailures.count(peer);
+    return c.text('This sign-in link was already used or has expired. Ask for a new one.', 410);
+  }
   // Links are only made with the owner key, so the session they start counts as an owner session too.
   createSession(c, l.userId, { owner: true });
   return c.redirect('/');
