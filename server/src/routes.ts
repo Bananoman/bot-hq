@@ -58,18 +58,20 @@ function createBot(userId: string, b: { name: string; label?: string; descriptio
 
 /**
  * Who may sign in. Every account gets agents with a shell on the shared computer, so on a public URL
- * only ALLOWED_EMAILS get in, and with an empty list nobody new does. `owner` (the key that only
- * exists on the server's machine) is always let in.
+ * only ALLOWED_EMAILS get in, and with an empty list nobody does: having an account already is no
+ * pass, or one made while the instance was open would get in forever. `owner` (the key that only
+ * exists on the server's machine) is always let in. Sessions are held to the same list afterwards
+ * (userFromToken).
  */
-function maySignIn(email: string, exists: boolean, owner: boolean): boolean {
+function maySignIn(email: string, owner: boolean): boolean {
   if (owner) return true;
   if (env.allowedEmails.length) return env.allowedEmails.includes(email.toLowerCase());
-  return exists || env.localOnly;
+  return env.localOnly;
 }
 
 function findOrCreateUser(email: string, name?: string, preferId?: string, opts: { owner?: boolean } = {}) {
   const existing = db.prepare('SELECT * FROM users WHERE lower(email)=lower(?)').get(email) as any;
-  if (!maySignIn(email, !!existing, !!opts.owner)) throw new UserError('This account is not allowed to sign in here.');
+  if (!maySignIn(email, !!opts.owner)) throw new UserError('This account is not allowed to sign in here.');
   if (existing) return { id: existing.id as string, isNew: false };
   const id = preferId ?? newId('usr');
   db.prepare('INSERT INTO users(id,email,name,created_at) VALUES (?,?,?,?)').run(id, email, name ?? email.split('@')[0], now());
@@ -151,7 +153,7 @@ api.post('/auth/owner', async (c) => {
       signInLinks.set(token, { userId: id, expires: Date.now() + 15 * 60_000 });
       return c.json({ ok: true, url: `${env.appUrl}/api/auth/link/${token}` });
     }
-    createSession(c, id);
+    createSession(c, id, { owner: true });
     return c.json({ ok: true });
   } catch (e: any) {
     return c.json({ error: e instanceof UserError ? e.message : 'could not sign in' }, 403);
@@ -163,7 +165,8 @@ api.get('/auth/link/:token', (c) => {
   const l = signInLinks.get(token);
   signInLinks.delete(token);
   if (!l || l.expires < Date.now()) return c.text('This sign-in link was already used or has expired. Ask for a new one.', 410);
-  createSession(c, l.userId);
+  // Links are only made with the owner key, so the session they start counts as an owner session too.
+  createSession(c, l.userId, { owner: true });
   return c.redirect('/');
 });
 

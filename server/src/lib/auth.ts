@@ -13,9 +13,10 @@ const TTL_MS = 30 * 24 * 3600 * 1000;
 
 export type AuthVars = { Variables: { user: User } };
 
-export function createSession(c: Context, userId: string) {
+/** `owner`: the session was made with the owner key (or a sign-in link made with it), see userFromToken. */
+export function createSession(c: Context, userId: string, opts: { owner?: boolean } = {}) {
   const t = token();
-  db.prepare('INSERT INTO auth_sessions(token,user_id,created_at,expires_at) VALUES (?,?,?,?)').run(t, userId, now(), now() + TTL_MS);
+  db.prepare('INSERT INTO auth_sessions(token,user_id,created_at,expires_at,owner) VALUES (?,?,?,?,?)').run(t, userId, now(), now() + TTL_MS, opts.owner ? 1 : 0);
   setCookie(c, COOKIE, t, { httpOnly: true, sameSite: 'Lax', secure: env.appUrl.startsWith('https:'), path: '/', maxAge: TTL_MS / 1000 });
 }
 
@@ -27,12 +28,20 @@ export function destroySession(c: Context) {
   }
 }
 
+/**
+ * The user a session token stands for. On a public URL the allowlist is asked on every request, not
+ * only at sign-in: an account made while the instance was open, or since taken off ALLOWED_EMAILS,
+ * is signed out even though its cookie is still good. A session made with the owner key is kept:
+ * whoever runs the server let that browser in on purpose, whatever the list says.
+ */
 export function userFromToken(t: string | undefined): User | null {
   if (!t) return null;
   const r = db
-    .prepare('SELECT u.* FROM auth_sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires_at>?')
+    .prepare('SELECT u.*, s.owner AS session_owner FROM auth_sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires_at>?')
     .get(t, now()) as any;
-  return r ? { id: r.id, email: r.email, name: r.name, avatarUrl: r.avatar_url } : null;
+  if (!r) return null;
+  if (!env.localOnly && !r.session_owner && !env.allowedEmails.includes(String(r.email).toLowerCase())) return null;
+  return { id: r.id, email: r.email, name: r.name, avatarUrl: r.avatar_url };
 }
 
 export function userFromCookieHeader(cookieHeader: string | undefined): User | null {

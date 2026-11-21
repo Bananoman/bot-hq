@@ -155,5 +155,8 @@ addColumn('bots', 'engine_port', 'INTEGER');
 addColumn('bots', 'handback_at', 'INTEGER');
 addColumn('screens', 'width', 'INTEGER');
 addColumn('screens', 'height', 'INTEGER');
+// 1 = the session was made with the owner key (POST /api/auth/owner or its sign-in link). Such a
+// session is not held to ALLOWED_EMAILS; sessions from before this column count as ordinary ones.
+addColumn('auth_sessions', 'owner', 'INTEGER NOT NULL DEFAULT 0');
 
 export const now = () => Date.now();

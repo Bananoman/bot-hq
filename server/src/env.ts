@@ -103,7 +103,8 @@ export const env = {
   maxBots: Number(process.env.MAX_BOTS ?? 4),
   /**
    * Comma-separated emails allowed to sign in. Empty = anyone, but only while APP_URL is a local
-   * address; on a public URL an empty list lets no new account in (see routes.ts).
+   * address; on a public URL an empty list lets nobody in, and a session whose address is not on
+   * the list stops working (see routes.ts maySignIn, lib/auth.ts userFromToken).
    */
   allowedEmails: (process.env.ALLOWED_EMAILS ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
 };
@@ -112,5 +113,5 @@ if (process.env.DEV_LOGIN === '1' && !env.devLogin) {
   console.warn('[env] DEV_LOGIN=1 is ignored because APP_URL is not a local address. Use scripts/sign-in-link.sh instead.');
 }
 if (!env.localOnly && !env.allowedEmails.length) {
-  console.warn('[env] ALLOWED_EMAILS is empty and APP_URL is public: only existing accounts (and scripts/sign-in-link.sh) can sign in.');
+  console.warn('[env] ALLOWED_EMAILS is empty and APP_URL is public: nobody can sign in with Google, and only sign-ins made with scripts/sign-in-link.sh keep working. Set ALLOWED_EMAILS to let people in.');
 }

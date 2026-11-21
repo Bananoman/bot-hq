@@ -130,7 +130,7 @@ Then delete the public URL in Orgo. Screens of the other bots are released when 
 
 Run the install script again with a newer `hq-app.tgz`; settings and data are kept. Two things to know when coming from an older version:
 
-- **Sign-in is stricter.** The server refuses to start with the example `SESSION_SECRET`. On a public URL only addresses in `ALLOWED_EMAILS` can sign in (an empty list lets no new account in), and `DEV_LOGIN` only works on `localhost`. `scripts/sign-in-link.sh` still signs anyone in from the computer itself.
+- **Sign-in is stricter.** The server refuses to start with the example `SESSION_SECRET`. On a public URL only addresses in `ALLOWED_EMAILS` can sign in or stay signed in: an empty list lets nobody in, and an account that is not on the list is signed out even if it signed in before. `DEV_LOGIN` only works on `localhost`. `scripts/sign-in-link.sh` still signs anyone in from the computer itself, and that sign-in is kept whatever the list says.
 - **The project used to be called "Grokbot".** Old names keep working: `GROKBOT_*` environment variables are read when the `BOTHQ_*` ones are unset, an existing `data/grokbot.db` stays the default database, a computer that has `/root/grokbot` keeps using it for browser profiles and Library files, and old sign-in cookies and browser settings are still read.
 
 ## Run it locally
@@ -168,17 +168,18 @@ Open a bot's details panel, **Engine**. Pick a provider and model there. **Sign 
 ```bash
 npm run typecheck       # server and web
 npm run build
+node tests/security.mjs # sign-in and access checks; run after the build, needs no keys
 node tests/e2e.mjs https://<your-url>    # needs E2E_SESSION=<session cookie> (DEV_LOGIN=1 works only against localhost)
 ```
 
-The e2e suite creates a temporary bot (with its own Hermes gateway and screen), exercises chat, the browser on its screen, the live viewer, connected apps, voice sessions and settings, then deletes it. It calls real providers.
+The security checks start a throwaway copy of the built server on this machine, with made-up keys, a temporary database and a stand-in for Composio, and call nothing outside it. The e2e suite creates a temporary bot (with its own Hermes gateway and screen), exercises chat, the browser on its screen, the live viewer, connected apps, voice sessions and settings, then deletes it. It calls real providers.
 
 ```text
 server/src/         API, Hermes adapter (agent/loop.ts), engines (engine.ts), MCP endpoint (mcp.ts), screens (computer.ts)
 server/box/         what runs on the computer to dress a screen (desktop, dock, home screen, Chrome)
 web/src/            chat, bot settings, app connections, computer viewer, voice
 scripts/            pack, install, Hermes config helper, sign-in link
-tests/              Playwright end-to-end test
+tests/              security checks (no keys needed), Playwright end-to-end test
 docs/               architecture; the Orgo and xAI/Composio guides predate the Hermes engine
 ```
 
