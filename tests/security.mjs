@@ -77,6 +77,8 @@ const composioServer = http.createServer((q, res) => {
       composio.deleted.push(p.split('/').pop());
       return answer(200, { success: true });
     }
+    // What a turn asks before it starts: which apps the user has connected (none).
+    if (q.method === 'GET' && /\/connected_accounts$/.test(p)) return answer(200, { items: [], next_cursor: null, total_pages: 1, current_page: 1, total_items: 0 });
     composio.other.push(`${q.method} ${p}`);
     answer(404, { error: { message: 'stand-in: not implemented' } });
   });
@@ -164,6 +166,19 @@ async function googleSignIn(email, query = 'status=success') {
   const link = composio.links.at(-1);
   const res = await req(`${new URL(link.callback).pathname}${new URL(link.callback).search}&${query}`);
   return { res, cookie: sessionOf(res), connection: link.id, provisionalUserId: composio.sessions.at(-1), failed: (res.headers.get('location') ?? '').includes('login=failed') };
+}
+
+/** Call one of the app's tools as a bot's agent would; answers with the text the agent gets back. */
+async function tool(botId, name, args) {
+  const res = await mcp(botId, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } });
+  eq(res.status, 200, `tools/call ${name}`);
+  return (await res.json()).result.content[0].text;
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** Poll until `fn` answers something truthy. */
+async function until(fn, what, ms = 6000) {
+  for (const t0 = Date.now(); Date.now() - t0 < ms; await sleep(200)) { const v = await fn(); if (v) return v; }
+  throw new Error(`timed out waiting for ${what}`);
 }
 
 async function devLogin(email) {
@@ -383,6 +398,33 @@ try {
       eq(res.headers.get('content-security-policy'), "frame-ancestors 'none'", `${what}: Content-Security-Policy`);
     }
     gone.abort();
+  });
+
+  // ---------- G: a bot can delete only its own routines ----------
+
+  // With the scheduler on, so a routine that runs every second shows whether its schedule is alive.
+  // Each run starts a turn that fails at once (no engine listens), which is all it needs to do here.
+  await start({ ...LOCAL, BOTHQ_NO_SCHEDULER: undefined });
+  const mainBot = async (cookie) => (await (await req('/api/bots', { cookie })).json()).bots.find((b) => b.isPrimary).id;
+  const routineOf = async (cookie, botId, id) => (await (await req(`/api/bots/${botId}/routines`, { cookie })).json()).routines.find((r) => r.id === id);
+  let owner, other, routineId;
+  await step('a bot makes a routine and it runs', async () => {
+    owner = await mainBot(cookies.stale);
+    other = await mainBot(cookies.listed);
+    routineId = JSON.parse(await tool(owner, 'create_routine', { name: 'tick', prompt: 'tick', schedule: '* * * * * *' })).routine.id;
+    await until(async () => (await routineOf(cookies.stale, owner, routineId))?.lastRunAt, 'the first run');
+  });
+  await step('another user\'s bot cannot delete it: "No such routine.", and it keeps running', async () => {
+    eq(await tool(other, 'delete_routine', { routine_id: routineId }), 'No such routine.', 'answer to the other bot');
+    const seen = (await routineOf(cookies.stale, owner, routineId))?.lastRunAt;
+    if (!seen) throw new Error('the routine is gone');
+    // Its schedule was not stopped on the way to that answer.
+    await until(async () => (await routineOf(cookies.stale, owner, routineId))?.lastRunAt > seen, 'a run after the refused delete');
+  });
+  await step('its own bot deletes it; a routine that does not exist is "No such routine."', async () => {
+    eq(await tool(owner, 'delete_routine', { routine_id: routineId }), 'Deleted.', 'answer to the owner');
+    eq(await routineOf(cookies.stale, owner, routineId), undefined, 'routine after delete');
+    eq(await tool(owner, 'delete_routine', { routine_id: routineId }), 'No such routine.', 'answer the second time');
   });
 } finally {
   await stop();

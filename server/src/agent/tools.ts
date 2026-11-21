@@ -220,9 +220,13 @@ export const TOOLS: ToolDef[] = [
     activity: 'working',
     label: 'Removing a routine',
     impl: async (a, ctx) => {
-      unscheduleRoutine(a.routine_id);
-      await deleteEventTrigger(a.routine_id);
-      db.prepare('DELETE FROM routines WHERE id=? AND bot_id=?').run(a.routine_id, ctx.botId);
+      // Its own routines only, and checked first: otherwise naming another bot's routine would stop
+      // its schedule and delete its trigger even though the row itself stayed.
+      const cur = db.prepare('SELECT id FROM routines WHERE id=? AND bot_id=?').get(a.routine_id, ctx.botId) as any;
+      if (!cur) return { output: 'No such routine.' };
+      unscheduleRoutine(cur.id);
+      await deleteEventTrigger(cur.id);
+      db.prepare('DELETE FROM routines WHERE id=? AND bot_id=?').run(cur.id, ctx.botId);
       hub.emit(ctx.userId, { type: 'routines', botId: ctx.botId });
       return { output: 'Deleted.' };
     },
