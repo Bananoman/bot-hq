@@ -12,6 +12,7 @@ import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import Database from 'better-sqlite3';
 
 const ROOT = path.resolve(new URL('.', import.meta.url).pathname, '..');
 const ENTRY = path.join(ROOT, 'server/dist/index.js');
@@ -425,6 +426,22 @@ try {
     eq(await tool(owner, 'delete_routine', { routine_id: routineId }), 'Deleted.', 'answer to the owner');
     eq(await routineOf(cookies.stale, owner, routineId), undefined, 'routine after delete');
     eq(await tool(owner, 'delete_routine', { routine_id: routineId }), 'No such routine.', 'answer the second time');
+  });
+
+  // ---------- H: sign-in attempts nobody finished do not pile up ----------
+
+  await step('starting a Google sign-in drops attempts older than 15 minutes, and only those', async () => {
+    const db = new Database(path.join(TMP, 'hq.db'));
+    try {
+      const add = db.prepare('INSERT INTO login_attempts(id,provisional_user_id,connected_account_id,created_at) VALUES (?,?,?,?)');
+      add.run('login_old', 'usr_old', 'ca_old', Date.now() - 16 * 60_000);
+      add.run('login_recent', 'usr_recent', 'ca_recent', Date.now() - 5 * 60_000);
+      eq((await req('/api/auth/google/start')).status, 302, 'start');
+      const left = db.prepare('SELECT id FROM login_attempts ORDER BY created_at').all().map((r) => r.id);
+      eq(left.includes('login_old'), false, 'the old attempt is still there');
+      eq(left.includes('login_recent'), true, 'the recent attempt is kept');
+      eq(left.length, 2, 'attempts left (the recent one and the one just started)');
+    } finally { db.close(); }
   });
 } finally {
   await stop();

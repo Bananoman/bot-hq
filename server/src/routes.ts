@@ -86,7 +86,13 @@ api.get('/auth/me', (c) => {
   return c.json({ user, devLogin: env.devLogin });
 });
 
+/** How long a Google sign-in may take from start to callback. */
+const LOGIN_ATTEMPT_TTL_MS = 15 * 60_000;
+
 api.get('/auth/google/start', async (c) => {
+  // Attempts nobody finished would otherwise stay forever (anyone can open this route). Past the
+  // time limit the callback refuses them anyway, so they are dropped whenever a new one begins.
+  db.prepare('DELETE FROM login_attempts WHERE created_at < ?').run(now() - LOGIN_ATTEMPT_TTL_MS);
   const attemptId = newId('login');
   const provisional = newId('usr');
   const cb = `${env.serverUrl}/api/auth/google/callback?attempt=${attemptId}`;
@@ -100,7 +106,7 @@ api.get('/auth/google/callback', async (c) => {
   // Only the Google connection this attempt started may sign in, and only for a short while: an
   // account id taken from the URL alone could name somebody else's connection.
   const caId: string | undefined = attempt?.connected_account_id ?? undefined;
-  const fresh = attempt && now() - attempt.created_at < 15 * 60_000;
+  const fresh = attempt && now() - attempt.created_at < LOGIN_ATTEMPT_TTL_MS;
   const given = c.req.query('connected_account_id');
   if (!attempt || !fresh || c.req.query('status') === 'failed' || !caId || (given && given !== caId)) {
     if (attempt) db.prepare('DELETE FROM login_attempts WHERE id=?').run(attempt.id);
