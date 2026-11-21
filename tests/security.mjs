@@ -1,8 +1,9 @@
 // Security checks against a throwaway server (no real keys, no engines, no computer).
 // Usage: npm run build -w server && node tests/security.mjs
-// Starts server/dist/index.js on a free loopback port with made-up keys and a database in a temp
-// folder, restarting it with different settings (local app, public URL, allowlist on and off).
-// Nothing is sent off this machine: Composio and Hermes point at a closed local port.
+// Starts server/dist/index.js on a free port with made-up keys and a database in a temp folder,
+// restarting it with different settings (local app, public URL, allowlist on and off).
+// Nothing is sent off this machine: Composio and Hermes point at a closed local port. A few steps
+// have the server listen on this machine's network address for a moment, to act as another device.
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -24,10 +25,13 @@ const step = async (name, fn) => {
     results.push({ name, ok: true });
     console.log(`PASS ${name}`);
   } catch (e) {
-    results.push({ name, ok: false, error: String(e?.message ?? e).split('\n')[0] });
-    console.log(`FAIL ${name}: ${String(e?.message ?? e).split('\n')[0]}`);
+    const why = String(e?.message ?? e).split('\n')[0];
+    if (e?.skip) { results.push({ name, ok: true, skipped: true }); console.log(`SKIP ${name}: ${why}`); return; }
+    results.push({ name, ok: false, error: why });
+    console.log(`FAIL ${name}: ${why}`);
   }
 };
+const skip = (why) => { throw Object.assign(new Error(why), { skip: true }); };
 const eq = (got, want, what) => { if (got !== want) throw new Error(`${what}: expected ${JSON.stringify(want)}, got ${JSON.stringify(got)}`); };
 
 const freePort = () => new Promise((resolve, reject) => {
@@ -38,6 +42,11 @@ const freePort = () => new Promise((resolve, reject) => {
 const PORT = await freePort();
 const DEAD = 'http://127.0.0.1:9'; // nothing listens on the discard port
 const BASE = `http://127.0.0.1:${PORT}`;
+// An address of this machine that is not loopback, to stand in for "another device" (none = those steps are skipped).
+const nics = Object.entries(os.networkInterfaces()).flatMap(([name, list]) => (list ?? []).filter((i) => !i.internal && i.family === 'IPv4').map((i) => ({ name, address: i.address })));
+const LAN_IP = (nics.find((i) => !/^(u?tun|tap)/.test(i.name)) ?? nics[0])?.address ?? null;
+const LAN = LAN_IP ? `http://${LAN_IP}:${PORT}` : null;
+const needLan = () => LAN ?? skip('this machine has no network address besides loopback');
 
 // ---------- the server under test ----------
 
@@ -90,6 +99,14 @@ const req = (p, { cookie, headers, body, method, base = BASE } = {}) => fetch(`$
   headers: { ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...(cookie ? { cookie: `bothq_session=${cookie}` } : {}), ...(headers ?? {}) },
   body: body === undefined ? undefined : JSON.stringify(body),
 });
+/** Passes when nothing listens at `url`. */
+async function refused(url) {
+  try { await fetch(url, { signal: AbortSignal.timeout(3000) }); } catch (e) {
+    if (e?.cause?.code === 'ECONNREFUSED') return;
+    throw new Error(`expected ${url} to refuse the connection, got ${e?.cause?.code ?? e}`);
+  }
+  throw new Error(`${url} answered`);
+}
 const sessionOf = (res) => (res.headers.get('set-cookie') ?? '').match(/bothq_session=([^;]+)/)?.[1];
 const me = async (cookie) => (await (await req('/api/auth/me', { cookie })).json()).user?.email ?? null;
 const OWNER_KEY = crypto.createHmac('sha256', SECRET).update('owner-login').digest('hex');
@@ -159,6 +176,25 @@ try {
     eq(await me(cookies.stale), STALE, 'stale session');
     eq(await me(cookies.listed), LISTED, 'listed session');
   });
+
+  // ---------- B: a local app listens on this machine only ----------
+
+  await start({ ...LOCAL, HOST: undefined });
+  await step('local app, HOST unset: listens on 127.0.0.1 and answers as localhost', async () => {
+    eq((await fetch(`http://localhost:${PORT}/api/health`)).status, 200, 'http://localhost');
+    if (!log.includes('listening on 127.0.0.1')) throw new Error(`start-up line does not name 127.0.0.1: ${log.split('\n').find((l) => l.includes('[bothq] server')) ?? '(none)'}`);
+  });
+  await step('local app, HOST unset: not offered on the network address', async () => refused(`${needLan()}/api/health`));
+  if (LAN) await start({ ...LOCAL, HOST: LAN_IP }, LAN);
+  await step('HOST set: the server listens there instead', async () => {
+    eq((await fetch(`${needLan()}/api/health`)).status, 200, 'network address');
+    await refused(`${BASE}/api/health`);
+  });
+  if (LAN) await start({ ...PUBLIC, ALLOWED_EMAILS: LISTED, HOST: undefined });
+  await step('public URL, HOST unset: still every interface', async () => {
+    eq((await fetch(`${needLan()}/api/health`)).status, 200, 'network address');
+    eq((await fetch(`${BASE}/api/health`)).status, 200, 'loopback');
+  });
 } finally {
   await stop();
   fs.rmSync(TMP, { recursive: true, force: true });
@@ -170,6 +206,7 @@ await step('the server reached for nothing outside this machine but the Composio
 console.log(`   blocked outbound connections: ${[...blocked].join(', ') || 'none'}`);
 
 const failed = results.filter((r) => !r.ok).length;
-console.log(`\n${results.length - failed} passed, ${failed} failed.`);
+const skipped = results.filter((r) => r.skipped).length;
+console.log(`\n${results.length - failed - skipped} passed, ${failed} failed, ${skipped} skipped.`);
 if (failed && log) console.log(`--- last server log ---\n${log}`);
 process.exit(failed ? 1 : 0);

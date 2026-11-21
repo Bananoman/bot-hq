@@ -56,8 +56,12 @@ const appUrl = process.env.APP_URL ?? 'http://localhost:5173';
 
 export const env = {
   port: Number(process.env.PORT ?? 8787),
-  /** Interface to listen on. Unset = every interface (what an Orgo public URL needs). */
-  host: process.env.HOST || undefined,
+  /**
+   * Interface to listen on. Unset = this machine only (127.0.0.1) while APP_URL is a local address,
+   * so a development server is not offered to the whole network; otherwise every interface (what an
+   * Orgo public URL needs). HOST, when set, always wins.
+   */
+  host: process.env.HOST || (isLoopbackUrl(appUrl) ? '127.0.0.1' : undefined),
   appUrl,
   /** Public URL of this server, used for OAuth callbacks. */
   serverUrl: process.env.SERVER_URL ?? `http://localhost:${process.env.PORT ?? 8787}`,

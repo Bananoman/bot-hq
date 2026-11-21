@@ -146,7 +146,7 @@ npm run dev -w server     # API on :8787
 npm run dev -w web        # app on :5173
 ```
 
-With `HQ_LOCAL=0` the server reaches the computer through the Orgo API instead of running commands on it, which is enough for development. `DEV_LOGIN=1` enables the email-only sign-in form; it only works while `APP_URL` is a `localhost` address, and only for requests from the same machine. Before you put the app on a public URL, read [SECURITY.md](SECURITY.md).
+With `HQ_LOCAL=0` the server reaches the computer through the Orgo API instead of running commands on it, which is enough for development. `DEV_LOGIN=1` enables the email-only sign-in form; it only works while `APP_URL` is a `localhost` address, and only for requests from the same machine. While `APP_URL` is a `localhost` address the server also listens on `127.0.0.1` only; set `HOST` (for example `HOST=0.0.0.0`) to reach it from another device. Before you put the app on a public URL, read [SECURITY.md](SECURITY.md).
 
 `npm run build && npm start` serves the built app from the API port.
 
