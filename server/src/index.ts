@@ -30,6 +30,17 @@ initRooms();
 expireStaleApprovals();
 
 const app = new Hono();
+// Nothing the server sends is meant to be shown inside another site's frame (clickjacking), so every
+// response says so, in both the current form and the one older browsers know. A route that sets a
+// Content-Security-Policy of its own keeps it: frame-ancestors is added to it unless it names one
+// (no route does yet; the app-connection callback page sets none and its inline script is unaffected).
+app.use('*', async (c, next) => {
+  await next();
+  const csp = c.res.headers.get('Content-Security-Policy');
+  if (!csp) c.res.headers.set('Content-Security-Policy', "frame-ancestors 'none'");
+  else if (!/(^|;)\s*frame-ancestors(\s|;|$)/i.test(csp)) c.res.headers.set('Content-Security-Policy', `${csp.replace(/[;\s]+$/, '')}; frame-ancestors 'none'`);
+  if (!c.res.headers.has('X-Frame-Options')) c.res.headers.set('X-Frame-Options', 'DENY');
+});
 // Cookie-authenticated writes must come from the app's own pages (CSRF; see sameOriginWrites).
 app.use('/api/*', sameOriginWrites);
 app.get('/api/health', (c) => c.json({ ok: true, engine: 'hermes' }));

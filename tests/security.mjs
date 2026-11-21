@@ -313,6 +313,7 @@ try {
 
   // ---------- D: only the exact app-connection callback skips the session check ----------
 
+  await start({ ...PUBLIC, ALLOWED_EMAILS: LISTED });
   await step('signed out: routes that merely start like the callback need a session', async () => {
     eq((await req('/api/apps/callback', { method: 'DELETE' })).status, 401, 'DELETE /api/apps/callback');
     eq((await req('/api/apps/callback', { body: {} })).status, 401, 'POST /api/apps/callback');
@@ -357,6 +358,31 @@ try {
     eq((await req('/api/auth/owner', { base, headers: asOwner, body: { email: GUEST } })).status, 403, 'owner sign-in');
     eq((await mcp('primary', ping, { base })).status, 403, '/mcp/primary');
     if (!log.includes('[mcp] refused a call')) throw new Error('nothing logged about the refused /mcp call');
+  });
+
+  // ---------- F: nothing the server sends may be framed by another site ----------
+
+  await start({ ...PUBLIC, ALLOWED_EMAILS: LISTED });
+  await step('every kind of response forbids framing', async () => {
+    const answers = {
+      'GET /api/health (json)': await req('/api/health'),
+      'GET /api/bots (401)': await req('/api/bots'),
+      'GET /api/apps/callback (page)': await req('/api/apps/callback?slug=gmail'),
+      'GET / (the app, or 404 when it is not built)': await req('/'),
+      'GET /favicon.svg (a file of the app, or 404)': await req('/favicon.svg'),
+      'GET /no/such/page': await req('/no/such/page'),
+      'GET /mcp/primary (405)': await req('/mcp/primary'),
+      'GET /api/auth/link/x (410)': await req('/api/auth/link/x'),
+    };
+    // The event stream answers before it has anything to send; its headers are enough here.
+    const gone = new AbortController();
+    answers['GET /api/events (stream)'] = await fetch(`${BASE}/api/events`, { headers: { cookie: `bothq_session=${cookies.listed}` }, signal: gone.signal });
+    eq(answers['GET /api/events (stream)'].status, 200, 'event stream');
+    for (const [what, res] of Object.entries(answers)) {
+      eq(res.headers.get('x-frame-options'), 'DENY', `${what}: X-Frame-Options`);
+      eq(res.headers.get('content-security-policy'), "frame-ancestors 'none'", `${what}: Content-Security-Policy`);
+    }
+    gone.abort();
   });
 } finally {
   await stop();
