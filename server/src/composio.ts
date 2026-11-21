@@ -125,6 +125,8 @@ const READ_RE = /_(GET|LIST|SEARCH|FETCH|FIND|READ|RETRIEVE|QUERY|LOOKUP|CHECK|D
 export const isReadOnlySlug = (slug: string) => READ_RE.test(slug.toUpperCase());
 
 // ---------- sign-in via Composio-managed Google (Gmail) connection ----------
+// The connection is made under a throwaway user id and deleted once the address is read (routes.ts):
+// it proves who is signing in and gives no bot a mailbox.
 
 export async function startGoogleLogin(provisionalUserId: string, callbackUrl: string) {
   const session = await composio.create(provisionalUserId, { manageConnections: false } as any);
@@ -144,6 +146,7 @@ export async function googleProfile(connectedAccountId: string): Promise<{ email
   return { email, name: undefined };
 }
 
+/** Never throws: sign-in goes on when the delete fails, and the failure is logged so it can be cleaned up by hand. */
 export async function deleteConnection(id: string) {
-  try { await composio.connectedAccounts.delete(id); } catch { /* ignore */ }
+  try { await composio.connectedAccounts.delete(id); } catch (e) { console.warn(`[composio] could not delete connection ${id}:`, (e as Error)?.message ?? e); }
 }

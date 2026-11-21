@@ -69,11 +69,11 @@ function maySignIn(email: string, owner: boolean): boolean {
   return env.localOnly;
 }
 
-function findOrCreateUser(email: string, name?: string, preferId?: string, opts: { owner?: boolean } = {}) {
+function findOrCreateUser(email: string, name?: string, opts: { owner?: boolean } = {}) {
   const existing = db.prepare('SELECT * FROM users WHERE lower(email)=lower(?)').get(email) as any;
   if (!maySignIn(email, !!opts.owner)) throw new UserError('This account is not allowed to sign in here.');
   if (existing) return { id: existing.id as string, isNew: false };
-  const id = preferId ?? newId('usr');
+  const id = newId('usr');
   db.prepare('INSERT INTO users(id,email,name,created_at) VALUES (?,?,?,?)').run(id, email, name ?? email.split('@')[0], now());
   createBot(id, { name: env.primaryBotName, label: env.primaryBotLabel, description: 'Your main point of contact. Checks in proactively and coordinates work with your other Bots.', avatarShape: 'blob', avatarColor: 'black', isPrimary: true });
   return { id, isNew: true };
@@ -104,20 +104,23 @@ api.get('/auth/google/callback', async (c) => {
   const given = c.req.query('connected_account_id');
   if (!attempt || !fresh || c.req.query('status') === 'failed' || !caId || (given && given !== caId)) {
     if (attempt) db.prepare('DELETE FROM login_attempts WHERE id=?').run(attempt.id);
+    // Whatever this attempt's own connection got as far as, it is not kept (never one named only in the URL).
+    if (caId) await deleteConnection(caId);
     return c.redirect(`${env.appUrl}/?login=failed`);
   }
   db.prepare('DELETE FROM login_attempts WHERE id=?').run(attempt.id);
   try {
-    const profile = await googleProfile(caId);
-    const { id, isNew } = findOrCreateUser(profile.email, profile.name, attempt.provisional_user_id);
-    // Existing user: the Gmail connection made for sign-in belongs to a throwaway id; remove it.
-    if (!isNew && id !== attempt.provisional_user_id) await deleteConnection(caId);
+    // The Gmail connection is only there to learn the address. It is removed as soon as that is read,
+    // for new and existing accounts alike and also when reading fails, so signing in never wires a
+    // mailbox to anyone's bots; Gmail is connected on purpose, under Apps. The account gets an id of
+    // its own (not the attempt's), so a connection that could not be removed is left with no owner.
+    let profile: { email: string; name?: string };
+    try { profile = await googleProfile(caId); } finally { await deleteConnection(caId); }
+    const { id } = findOrCreateUser(profile.email, profile.name);
     createSession(c, id);
     return c.redirect(`${env.appUrl}/`);
   } catch (e: any) {
-    // A refused account leaves no Gmail connection behind.
-    if (e instanceof UserError) await deleteConnection(caId);
-    else console.error('[auth] google callback', e);
+    if (!(e instanceof UserError)) console.error('[auth] google callback', e);
     return c.redirect(`${env.appUrl}/?login=failed`);
   }
 });
@@ -147,7 +150,7 @@ api.post('/auth/owner', async (c) => {
   const { email, name, link } = await c.req.json<{ email: string; name?: string; link?: boolean }>();
   if (!email?.includes('@')) return c.json({ error: 'email required' }, 400);
   try {
-    const { id } = findOrCreateUser(email, name, undefined, { owner: true });
+    const { id } = findOrCreateUser(email, name, { owner: true });
     if (link) {
       const token = crypto.randomBytes(24).toString('base64url');
       signInLinks.set(token, { userId: id, expires: Date.now() + 15 * 60_000 });

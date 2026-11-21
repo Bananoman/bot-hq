@@ -2,11 +2,13 @@
 // Usage: npm run build -w server && node tests/security.mjs
 // Starts server/dist/index.js on a free port with made-up keys and a database in a temp folder,
 // restarting it with different settings (local app, public URL, allowlist on and off).
-// Nothing is sent off this machine: Composio and Hermes point at a closed local port. A few steps
-// have the server listen on this machine's network address for a moment, to act as another device.
+// Nothing is sent off this machine: Composio is a stand-in served by this script and Hermes points
+// at a closed local port. A few steps have the server listen on this machine's network address for
+// a moment, to act as another device.
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -48,6 +50,42 @@ const LAN_IP = (nics.find((i) => !/^(u?tun|tap)/.test(i.name)) ?? nics[0])?.addr
 const LAN = LAN_IP ? `http://${LAN_IP}:${PORT}` : null;
 const needLan = () => LAN ?? skip('this machine has no network address besides loopback');
 
+// ---------- a stand-in for Composio: just enough of its API for Google sign-in ----------
+
+const composio = { email: '', failProfile: false, failDelete: false, sessions: [], links: [], deleted: [], other: [] };
+const composioServer = http.createServer((q, res) => {
+  let raw = '';
+  q.on('data', (d) => { raw += d; });
+  q.on('end', () => {
+    const body = raw ? JSON.parse(raw) : {};
+    const answer = (status, json) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(json)); };
+    const p = q.url.split('?')[0];
+    if (q.method === 'POST' && /\/tool_router\/session$/.test(p)) {
+      composio.sessions.push(body.user_id);
+      return answer(201, { session_id: `trs_${composio.sessions.length}`, mcp: { type: 'http', url: `${COMPOSIO}/mcp` }, tool_router_tools: [], config: { user_id: body.user_id } });
+    }
+    if (q.method === 'POST' && /\/tool_router\/session\/[^/]+\/link$/.test(p)) {
+      const id = `ca_${composio.links.length + 1}`;
+      composio.links.push({ id, toolkit: body.toolkit, callback: body.callback_url });
+      return answer(201, { connected_account_id: id, redirect_url: `https://accounts.example.test/consent?ca=${id}`, link_token: 'lt' });
+    }
+    if (q.method === 'POST' && /\/tools\/execute\/proxy$/.test(p)) {
+      return composio.failProfile ? answer(400, { error: { message: 'stand-in: profile unavailable' } }) : answer(200, { data: { emailAddress: composio.email }, status: 200, headers: {} });
+    }
+    if (q.method === 'DELETE' && /\/connected_accounts\/[^/]+$/.test(p)) {
+      if (composio.failDelete) return answer(404, { error: { message: 'stand-in: no such connection' } });
+      composio.deleted.push(p.split('/').pop());
+      return answer(200, { success: true });
+    }
+    composio.other.push(`${q.method} ${p}`);
+    answer(404, { error: { message: 'stand-in: not implemented' } });
+  });
+});
+await new Promise((r) => composioServer.listen(0, '127.0.0.1', r));
+const COMPOSIO = `http://127.0.0.1:${composioServer.address().port}`;
+// Where bots' own gateways would listen. None ever starts here; the server only looks for one.
+const ENGINE_PORT_BASE = await freePort();
+
 // ---------- the server under test ----------
 
 let child = null;
@@ -66,9 +104,9 @@ async function start(extra, reach = BASE) {
     env: {
       PATH: process.env.PATH ?? '', HOME: TMP, NODE_ENV: 'test', TELEMETRY_DISABLED: 'true',
       PORT: String(PORT), HOST: '127.0.0.1', SESSION_SECRET: SECRET, DB_PATH: path.join(TMP, 'hq.db'),
-      XAI_API_KEY: 'test-not-a-key', COMPOSIO_API_KEY: 'test-not-a-key', COMPOSIO_BASE_URL: DEAD, ORGO_API_KEY: 'test-not-a-key',
+      XAI_API_KEY: 'test-not-a-key', COMPOSIO_API_KEY: 'test-not-a-key', COMPOSIO_BASE_URL: COMPOSIO, ORGO_API_KEY: 'test-not-a-key',
       HERMES_URL: DEAD, HERMES_HOME_PRIMARY: path.join(TMP, 'hermes'), HERMES_BIN: path.join(TMP, 'no-hermes'),
-      ENGINES_DIR: path.join(TMP, 'engines'), ENGINE_PORT_BASE: String(PORT + 1), MAX_BOTS: '20', BOTHQ_NO_SCHEDULER: '1',
+      ENGINES_DIR: path.join(TMP, 'engines'), ENGINE_PORT_BASE: String(ENGINE_PORT_BASE), MAX_BOTS: '20', BOTHQ_NO_SCHEDULER: '1',
       ...extra,
     },
   });
@@ -111,6 +149,19 @@ const sessionOf = (res) => (res.headers.get('set-cookie') ?? '').match(/bothq_se
 const me = async (cookie) => (await (await req('/api/auth/me', { cookie })).json()).user?.email ?? null;
 const OWNER_KEY = crypto.createHmac('sha256', SECRET).update('owner-login').digest('hex');
 const asOwner = { authorization: `Bearer ${OWNER_KEY}` };
+
+/**
+ * Google sign-in as `email`, the way a browser goes through it: start, then the provider's redirect
+ * back to the callback. Answers with the callback's response and the connection the attempt made.
+ */
+async function googleSignIn(email, query = 'status=success') {
+  composio.email = email;
+  const started = await req('/api/auth/google/start');
+  eq(started.status, 302, 'start');
+  const link = composio.links.at(-1);
+  const res = await req(`${new URL(link.callback).pathname}${new URL(link.callback).search}&${query}`);
+  return { res, cookie: sessionOf(res), connection: link.id, provisionalUserId: composio.sessions.at(-1), failed: (res.headers.get('location') ?? '').includes('login=failed') };
+}
 
 async function devLogin(email) {
   const res = await req('/api/auth/dev', { body: { email } });
@@ -195,8 +246,70 @@ try {
     eq((await fetch(`${needLan()}/api/health`)).status, 200, 'network address');
     eq((await fetch(`${BASE}/api/health`)).status, 200, 'loopback');
   });
+
+  // ---------- C: the Gmail connection made for sign-in is never kept ----------
+
+  await start(LOCAL);
+  await step('Google sign-in, new account: signed in, connection deleted, account id is not the attempt\'s', async () => {
+    const g = await googleSignIn('new.person@example.test');
+    eq(await me(g.cookie), 'new.person@example.test', 'signed in as');
+    eq(composio.deleted.includes(g.connection), true, 'connection deleted');
+    const id = (await (await req('/api/auth/me', { cookie: g.cookie })).json()).user.id;
+    if (id === g.provisionalUserId) throw new Error('the account took the id the connection was made under');
+  });
+  await step('Google sign-in, existing account: signed in, connection deleted', async () => {
+    const g = await googleSignIn(STALE);
+    eq(await me(g.cookie), STALE, 'signed in as');
+    eq(composio.deleted.includes(g.connection), true, 'connection deleted');
+  });
+  await step('Google sign-in goes on when the connection cannot be deleted, and says so in the log', async () => {
+    composio.failDelete = true;
+    try {
+      const g = await googleSignIn('undeletable@example.test');
+      eq(await me(g.cookie), 'undeletable@example.test', 'signed in as');
+      if (!log.includes(`could not delete connection ${g.connection}`)) throw new Error('nothing logged about the failed delete');
+    } finally { composio.failDelete = false; }
+  });
+  await step('Google sign-in that cannot read the address: not signed in, connection deleted', async () => {
+    composio.failProfile = true;
+    try {
+      const g = await googleSignIn('unread@example.test');
+      eq(g.failed && !g.cookie, true, 'refused');
+      eq(composio.deleted.includes(g.connection), true, 'connection deleted');
+    } finally { composio.failProfile = false; }
+  });
+  await step('Google sign-in the provider reports as failed: not signed in, connection deleted', async () => {
+    const g = await googleSignIn('gave.up@example.test', 'status=failed');
+    eq(g.failed && !g.cookie, true, 'refused');
+    eq(composio.deleted.includes(g.connection), true, 'connection deleted');
+  });
+
+  await start({ ...PUBLIC, ALLOWED_EMAILS: LISTED });
+  await step('public URL: Google sign-in for an address off the list is refused, connection deleted', async () => {
+    const g = await googleSignIn(STALE);
+    eq(g.failed && !g.cookie, true, 'refused');
+    eq(composio.deleted.includes(g.connection), true, 'connection deleted');
+  });
+  await step('public URL: Google sign-in for an address on the list works', async () => {
+    const g = await googleSignIn(LISTED);
+    eq(await me(g.cookie), LISTED, 'signed in as');
+    eq(composio.deleted.includes(g.connection), true, 'connection deleted');
+  });
+  await start({ ...PUBLIC, ALLOWED_EMAILS: '' });
+  await step('public URL, empty list: Google sign-in is refused even for an account that exists', async () => {
+    const g = await googleSignIn(LISTED);
+    eq(g.failed && !g.cookie, true, 'refused');
+    eq(composio.deleted.includes(g.connection), true, 'connection deleted');
+  });
+  await step('only Gmail sign-in connections were made, and every one was deleted', async () => {
+    eq(composio.links.every((l) => l.toolkit === 'gmail'), true, 'toolkit');
+    // One is missing on purpose: the step where deleting fails.
+    eq(composio.deleted.length, composio.links.length - 1, 'deleted connections');
+    eq(composio.other.join(', '), '', 'unexpected Composio calls');
+  });
 } finally {
   await stop();
+  composioServer.close();
   fs.rmSync(TMP, { recursive: true, force: true });
 }
 
