@@ -147,8 +147,11 @@ async function refused(url) {
 }
 const sessionOf = (res) => (res.headers.get('set-cookie') ?? '').match(/bothq_session=([^;]+)/)?.[1];
 const me = async (cookie) => (await (await req('/api/auth/me', { cookie })).json()).user?.email ?? null;
-const OWNER_KEY = crypto.createHmac('sha256', SECRET).update('owner-login').digest('hex');
-const asOwner = { authorization: `Bearer ${OWNER_KEY}` };
+const hmac = (what) => crypto.createHmac('sha256', SECRET).update(what).digest('hex');
+const asOwner = { authorization: `Bearer ${hmac('owner-login')}` };
+/** What a bot's agent presents to /mcp/<slug> (see mcpToken in engine.ts). */
+const asAgent = (slug) => ({ authorization: `Bearer ${hmac(`mcp:${slug}`)}` });
+const mcp = (slug, message, opts = {}) => req(`/mcp/${slug}`, { ...opts, headers: { ...asAgent(slug), ...(opts.headers ?? {}) }, body: message });
 
 /**
  * Google sign-in as `email`, the way a browser goes through it: start, then the provider's redirect
@@ -324,6 +327,36 @@ try {
     eq((await req('/api/auth/me')).status, 200, 'GET /api/auth/me');
     eq((await req('/api/auth/logout', { body: {} })).status, 200, 'POST /api/auth/logout');
     eq((await req('/api/health')).status, 200, 'GET /api/health');
+  });
+
+  // ---------- E: the owner sign-in and /mcp answer only calls made on this machine ----------
+
+  const ping = { jsonrpc: '2.0', id: 1, method: 'ping' };
+  await start({ ...PUBLIC, ALLOWED_EMAILS: LISTED });
+  await step('from this machine: the owner key and an agent token work', async () => {
+    eq((await req('/api/auth/owner', { headers: asOwner, body: { email: GUEST } })).status, 200, 'owner sign-in');
+    const res = await mcp('primary', ping);
+    eq(res.status, 200, '/mcp/primary');
+    eq(JSON.stringify((await res.json()).result), '{}', 'ping');
+  });
+  await step('from this machine with a wrong key: refused', async () => {
+    eq((await req('/api/auth/owner', { headers: { authorization: `Bearer ${hmac('something-else')}` }, body: { email: GUEST } })).status, 403, 'owner sign-in');
+    eq((await req('/mcp/primary', { headers: asAgent('other'), body: ping })).status, 401, '/mcp/primary');
+  });
+  await step('passed on by a proxy (forwarding headers): refused even with the right key', async () => {
+    for (const h of [{ 'x-forwarded-for': '203.0.113.9' }, { forwarded: 'for=203.0.113.9' }, { 'x-real-ip': '203.0.113.9' }, { 'x-forwarded-host': 'hq.example.test' }, { 'x-forwarded-proto': 'https' }, { via: '1.1 proxy' }]) {
+      const name = Object.keys(h)[0];
+      eq((await req('/api/auth/owner', { headers: { ...asOwner, ...h }, body: { email: GUEST } })).status, 403, `owner sign-in with ${name}`);
+      eq((await mcp('primary', ping, { headers: h })).status, 403, `/mcp/primary with ${name}`);
+    }
+  });
+  if (LAN) await start({ ...PUBLIC, ALLOWED_EMAILS: LISTED, HOST: LAN_IP }, LAN);
+  await step('from another address: refused even with the right key', async () => {
+    const base = needLan();
+    eq((await req('/api/health', { base })).status, 200, 'reachable at all');
+    eq((await req('/api/auth/owner', { base, headers: asOwner, body: { email: GUEST } })).status, 403, 'owner sign-in');
+    eq((await mcp('primary', ping, { base })).status, 403, '/mcp/primary');
+    if (!log.includes('[mcp] refused a call')) throw new Error('nothing logged about the refused /mcp call');
   });
 } finally {
   await stop();

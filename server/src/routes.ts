@@ -6,7 +6,7 @@ import { env } from './env.js';
 import { newId } from './lib/ids.js';
 import { hub } from './lib/hub.js';
 import { getConnInfo } from '@hono/node-server/conninfo';
-import { createSession, destroySession, isLoopbackAddress, isOwnerKey, requireUser, userFromCookieHeader, type AuthVars } from './lib/auth.js';
+import { createSession, destroySession, isLocalRequest, isLoopbackAddress, isOwnerKey, requireUser, userFromCookieHeader, type AuthVars } from './lib/auth.js';
 import { allLive, appendRow, clearConversation, emitBot, getBot, getBotRow, getRow, listBots, listRoutines, listRows, listTasks, toRoutine, updateRow } from './store.js';
 import { enqueue, interrupt, resolveApproval } from './agent/loop.js';
 import { computerState, ensureComputer, forgetBotFiles, readyScreen, refreshComputer, releaseScreen, suspendComputer } from './computer.js';
@@ -143,10 +143,11 @@ api.post('/auth/dev', async (c) => {
 /** One-time sign-in links made by the owner endpoint. Kept in memory: a restart drops them. */
 const signInLinks = new Map<string, { userId: string; expires: number }>();
 
-// Sign-in for whoever runs the server, without Google: the key only exists on the machine (see isOwnerKey).
+// Sign-in for whoever runs the server, without Google: the key only exists on the machine (see isOwnerKey),
+// and the request has to come from the machine too, so nobody elsewhere gets to try keys (see isLocalRequest).
 // With `link`, it answers with a link that signs one browser in, once (scripts/sign-in-link.sh).
 api.post('/auth/owner', async (c) => {
-  if (!isOwnerKey((c.req.header('authorization') ?? '').replace(/^Bearer\s+/i, ''))) return c.json({ error: 'forbidden' }, 403);
+  if (!isLocalRequest(c) || !isOwnerKey((c.req.header('authorization') ?? '').replace(/^Bearer\s+/i, ''))) return c.json({ error: 'forbidden' }, 403);
   const { email, name, link } = await c.req.json<{ email: string; name?: string; link?: boolean }>();
   if (!email?.includes('@')) return c.json({ error: 'email required' }, 400);
   try {

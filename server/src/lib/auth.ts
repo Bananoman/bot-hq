@@ -1,6 +1,7 @@
 import type { Context, MiddlewareHandler } from 'hono';
 import crypto from 'node:crypto';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
+import { getConnInfo } from '@hono/node-server/conninfo';
 import { env } from '../env.js';
 import { db, now } from '../db.js';
 import { token } from './ids.js';
@@ -91,6 +92,22 @@ export function isLoopbackAddress(addr: string | undefined): boolean {
   if (!addr) return false;
   const a = addr.replace(/^::ffff:/i, '');
   return a === '::1' || /^127\.\d+\.\d+\.\d+$/.test(a);
+}
+
+/** Headers a proxy adds when it passes a request on. A program calling from this machine sends none of them. */
+const FORWARDING_HEADERS = ['forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-real-ip', 'via'];
+
+/**
+ * Whether a request was made on this machine and not passed on from elsewhere: the socket peer is a
+ * loopback address and no forwarding header is present. For the endpoints only local programs use
+ * (owner sign-in, the agents' /mcp). The headers matter because a proxy on this machine (a public
+ * URL forwarder, a tunnel) connects from loopback as well. One that adds none of these headers
+ * cannot be told from a local caller, which is why those endpoints still ask for their key. Sending
+ * such a header oneself only gets a caller refused, never let in.
+ */
+export function isLocalRequest(c: Context): boolean {
+  if (FORWARDING_HEADERS.some((h) => c.req.header(h) !== undefined)) return false;
+  return isLoopbackAddress(getConnInfo(c).remote.address);
 }
 
 /**

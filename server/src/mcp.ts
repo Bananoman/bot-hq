@@ -1,5 +1,7 @@
 import crypto from 'node:crypto';
 import { Hono } from 'hono';
+import { getConnInfo } from '@hono/node-server/conninfo';
+import { isLocalRequest } from './lib/auth.js';
 import { getBotRow } from './store.js';
 import { composioTools } from './composio.js';
 import { mcpToken, primaryBotId } from './engine.js';
@@ -16,6 +18,9 @@ import { policyFor, runComposioTool, toolMap, TOOLS, type ToolCtx } from './agen
  * Every call is stateless: the URL says which bot is calling. Besides the app's own tools the list
  * carries the user's Composio tools, so connected apps (and the approvals around them) work the
  * same for every engine.
+ *
+ * The engines run on this machine and reach the endpoint on a loopback address (MCP_BASE_URL), so
+ * calls from anywhere else are refused before the token is looked at (see isLocalRequest).
  */
 
 const DECLINED = 'The user declined this action. Do not retry it. Find another way, or tell the user what you could not do.';
@@ -132,7 +137,15 @@ async function handle(msg: any, botId: string | null): Promise<object | null> {
 
 export const mcpApi = new Hono();
 
+let warnedRemote = false;
+
 mcpApi.post('/:bot', async (c) => {
+  if (!isLocalRequest(c)) {
+    // Said once: an agent set up to call from elsewhere would otherwise just seem to have lost its tools.
+    if (!warnedRemote) console.warn(`[mcp] refused a call that did not come straight from this machine (peer ${getConnInfo(c).remote.address ?? 'unknown'}). Agents must reach /mcp on a loopback address; check MCP_BASE_URL.`);
+    warnedRemote = true;
+    return c.json(rpcError(null, -32001, 'Forbidden: /mcp only answers calls made on the machine the app runs on'), 403);
+  }
   const who = caller(c.req.param('bot'), c.req.header('authorization'));
   if (!who) return c.json(rpcError(null, -32001, 'Unauthorized'), 401);
   let body: any;
