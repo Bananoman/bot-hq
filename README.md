@@ -46,7 +46,7 @@ Every bot is a Hermes agent, so it can run on the model subscriptions you alread
 | **Chat that shows the work** | While a bot works you see what it is doing right now, how long it has been at it, and each step it took. Finished turns fold into a "Worked for 2m 10s · 7 steps" chip you can open. |
 | **A screen per bot** | Every bot has its own desktop on the shared computer. Watch it live in the side panel, open it full size, or take control with your own mouse and keyboard. |
 | **Your existing Hermes agent, kept as it is** | The first bot is the Hermes agent already running on the computer. Its messaging channels, skills and memory keep working; the app only calls its API. |
-| **Connected apps with approvals** | Bots ask for the app they need and you connect it through Composio. Actions that write (send, post, delete) wait for your OK on a card in the chat. |
+| **Connected apps with approvals** | Bots ask for the app they need and you connect it through Composio. Every action in a connected app, reading included, waits for your OK on a card in the chat until you choose **Always allow** for it. |
 | **Model and subscription per bot** | Pick the provider and model in the bot's Engine panel, or sign in to a subscription on the bot's own screen. |
 | **Voice** | Talk to a bot with xAI's realtime voice modes. Real work is handed to the same bot, with the same memory and tools. |
 | **Research on X** | Every bot has an `x_search` tool, backed by xAI. |
@@ -131,6 +131,7 @@ Then delete the public URL in Orgo. Screens of the other bots are released when 
 Run the install script again with a newer `hq-app.tgz`; settings and data are kept. Two things to know when coming from an older version:
 
 - **Sign-in is stricter.** The server refuses to start with the example `SESSION_SECRET`. On a public URL only addresses in `ALLOWED_EMAILS` can sign in or stay signed in: an empty list lets nobody in, and an account that is not on the list is signed out even if it signed in before. `DEV_LOGIN` only works on `localhost`. `scripts/sign-in-link.sh` still signs anyone in from the computer itself, and that sign-in is kept whatever the list says.
+- **Bots ask before every app action.** Actions whose name sounded read-only (get, list, search, fetch and the like) used to run without asking; now each asks the first time, as do Composio's sandbox tools. Choose **Always allow** on the card for the ones you trust. Choices you made before are kept. A routine that runs while nobody is there waits for its card (up to 25 minutes) and is skipped if it is not answered, so allow what your routines use.
 - **`/mcp` and the owner sign-in only answer on the computer itself.** A call has to come from a loopback address and must not have been passed on by a proxy. The defaults already work this way (`MCP_BASE_URL` is `http://127.0.0.1:<port>`, and `scripts/sign-in-link.sh` calls `127.0.0.1`); an agent that reaches `/mcp` through the public URL or from another machine or container is refused with a 403.
 - **The project used to be called "Grokbot".** Old names keep working: `GROKBOT_*` environment variables are read when the `BOTHQ_*` ones are unset, an existing `data/grokbot.db` stays the default database, a computer that has `/root/grokbot` keeps using it for browser profiles and Library files, and old sign-in cookies and browser settings are still read.
 
@@ -187,7 +188,7 @@ docs/               architecture; the Orgo and xAI/Composio guides predate the H
 ## Status and limits
 
 - Experimental. Bots share one computer, run as root and can reach each other's files there. Read [SECURITY.md](SECURITY.md) before deploying.
-- Approval cards cover Composio write actions. What a bot does through its browser or shell is not gated, and Hermes' own "risky command" prompts are not shown in the app yet.
+- Approval cards cover what a bot does in connected apps through Composio. What a bot does through its browser or shell is not gated, and Hermes' own "risky command" prompts are not shown in the app yet.
 - Four bots at most, because of Orgo's four-screen limit.
 - The screen look is an original implementation inspired by OrgoAI/bops; no code or assets from that repository are used.
 

@@ -5,7 +5,7 @@ import { box } from '../box.js';
 import { env } from '../env.js';
 import { libraryRoot } from '../paths.js';
 import { appendRow, getBotRow, listRoutines, toRoutine, describeCron } from '../store.js';
-import { executeComposio, innerToolSlugs, isReadOnlySlug, toolkitInfo } from '../composio.js';
+import { batchActions, executeComposio, LOOKUP_META_TOOLS, MULTI_EXECUTE, SANDBOX_META_TOOLS, toolkitInfo } from '../composio.js';
 import { scheduleRoutine, unscheduleRoutine } from '../routines.js';
 import { createEventRoutine, deleteEventTrigger, describeEvent, listTriggerTypes } from '../triggers.js';
 import { setCheckins } from '../proactive.js';
@@ -334,28 +334,61 @@ export const toolMap = new Map(TOOLS.map((t) => [t.name, t]));
 
 export type Decision = 'allow' | 'ask' | 'block';
 
-export function policyFor(userId: string, toolName: string, args: any): { decision: Decision; key: string; toolkit?: string; title: string } {
-  if (toolMap.has(toolName)) return { decision: 'allow', key: toolName, title: toolName };
-  const slugs = innerToolSlugs(toolName, args);
-  if (!slugs.length) {
-    // Composio's sandbox can run app actions from code, which would slip past the per-action
-    // approvals below. Code that reaches for them is treated like a write to an app.
-    if (/^COMPOSIO_REMOTE_(WORKBENCH|BASH_TOOL)$/.test(toolName) && /run_composio_tool|proxy_execute|execute_tool|composio/i.test(JSON.stringify(args ?? {}))) {
-      const p = db.prepare('SELECT mode FROM policies WHERE user_id=? AND tool=?').get(userId, toolName) as any;
-      const mode = p?.mode ?? 'needs_approval';
-      return { decision: mode === 'blocked' ? 'block' : mode === 'always_allow' ? 'allow' : 'ask', key: toolName, title: 'Run code that uses your connected apps' };
-    }
-    return { decision: 'allow', key: toolName, title: toolName };
+export interface Policy {
+  decision: Decision;
+  /** The tool the decision hangs on: the blocked one, or the first one the user is asked about. */
+  key: string;
+  toolkit?: string;
+  title: string;
+  /**
+   * Every tool the user is asked about, as shown on the approval card. "Always allow" stores a
+   * policy for exactly these. Empty when there is nothing that could be remembered.
+   */
+  asks: string[];
+}
+
+const toolkitOf = (slug: string) => slug.split('_')[0].toLowerCase();
+
+/**
+ * Whether a tool call may run, has to be approved first, or is refused.
+ *
+ * The app's own tools run. Of everything that goes to Composio, only the lookup tools in
+ * LOOKUP_META_TOOLS run unasked. Any app action, the sandbox tools (whatever their code looks
+ * like) and any COMPOSIO_* tool not known here ask, until the user has stored a policy for that
+ * tool with "Always allow" (kept and honoured) or blocked it. A batch asks about each of its
+ * actions that needs it, all on one card; one blocked action blocks the whole batch.
+ */
+export function policyFor(userId: string, toolName: string, args: any): Policy {
+  if (toolMap.has(toolName)) return { decision: 'allow', key: toolName, title: toolName, asks: [] };
+  // Composio's names are upper case. Folding first keeps another spelling from being a different tool here.
+  const name = toolName.toUpperCase();
+  const mode = (tool: string): string => {
+    const p = db.prepare('SELECT mode FROM policies WHERE user_id=? AND tool=? COLLATE NOCASE').get(userId, tool) as any;
+    return p?.mode ?? (LOOKUP_META_TOOLS.has(tool) ? 'always_allow' : 'needs_approval');
+  };
+
+  let slugs = [name];
+  if (name === MULTI_EXECUTE) {
+    const batch = batchActions(args);
+    // A batch that cannot be read in full is asked about as a whole, and nothing about it is remembered.
+    // (So is a batch inside a batch: allowing that by name would wave through whatever it holds.)
+    slugs = [...new Set(batch.actions.map((a) => a.slug))];
+    if (!batch.complete || slugs.includes(MULTI_EXECUTE)) return { decision: 'ask', key: name, title: 'Composio: run actions in your connected apps', asks: [] };
   }
-  let decision: Decision = 'allow';
-  let key = slugs[0];
+  const asks: string[] = [];
   for (const slug of slugs) {
-    const p = db.prepare('SELECT mode FROM policies WHERE user_id=? AND tool=?').get(userId, slug) as any;
-    const mode = p?.mode ?? (isReadOnlySlug(slug) ? 'always_allow' : 'needs_approval');
-    if (mode === 'blocked') return { decision: 'block', key: slug, title: humanizeSlug(slug) };
-    if (mode === 'needs_approval') { decision = 'ask'; key = slug; }
+    const m = mode(slug);
+    if (m === 'blocked') return { decision: 'block', key: slug, title: humanizeSlug(slug), asks: [] };
+    if (m !== 'always_allow') asks.push(slug);
   }
-  return { decision, key, toolkit: key.split('_')[0].toLowerCase(), title: humanizeSlug(key) };
+  // What the tools in question belong to, for the activity line and the card's logo (none for Composio's own tools).
+  const apps = [...new Set((asks.length ? asks : slugs).filter((s) => !s.startsWith('COMPOSIO_')).map(toolkitOf))];
+  const toolkit = apps.length === 1 ? apps[0] : undefined;
+  if (!asks.length) return { decision: 'allow', key: slugs[0], toolkit, title: humanizeSlug(slugs[0]), asks };
+  const title = asks.length > 1 ? `Apps: run ${asks.length} actions`
+    : SANDBOX_META_TOOLS.has(asks[0]) ? 'Composio: run code that can use your connected apps'
+    : humanizeSlug(asks[0]);
+  return { decision: 'ask', key: asks[0], toolkit, title, asks };
 }
 
 export function humanizeSlug(slug: string) {

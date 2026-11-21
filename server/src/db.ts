@@ -155,6 +155,9 @@ addColumn('bots', 'engine_port', 'INTEGER');
 addColumn('bots', 'handback_at', 'INTEGER');
 addColumn('screens', 'width', 'INTEGER');
 addColumn('screens', 'height', 'INTEGER');
+// JSON list of the tools an approval card asked about: "Always allow" stores a policy for each of
+// them and for nothing else (older rows have none and only `tool`).
+addColumn('approvals', 'tools', 'TEXT');
 // 1 = the session was made with the owner key (POST /api/auth/owner or its sign-in link). Such a
 // session is not held to ALLOWED_EMAILS; sessions from before this column count as ordinary ones.
 addColumn('auth_sessions', 'owner', 'INTEGER NOT NULL DEFAULT 0');

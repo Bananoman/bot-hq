@@ -3,11 +3,11 @@ import { newId } from '../lib/ids.js';
 import { hub } from '../lib/hub.js';
 import { appendRow, emitBot, getBotRow, getLive, getRow, setLive, updateRow } from '../store.js';
 import type { ActivityKind, MessageBody, ToolCallBody } from '../types.js';
-import { toolkitInfo } from '../composio.js';
+import { batchActions, toolkitInfo } from '../composio.js';
 import { screenForWork } from '../computer.js';
 import { engineFor } from '../engine.js';
 import { instructionsFor } from './prompt.js';
-import { activityFor, appToolName, humanizeSlug, policyFor } from './tools.js';
+import { activityFor, appToolName, humanizeSlug, policyFor, type Policy } from './tools.js';
 
 /**
  * A turn: one message handed to the bot's Hermes engine and streamed back into the conversation.
@@ -111,7 +111,8 @@ export async function claimToolRow(botId: string, name: string): Promise<number 
   for (;;) {
     const t = turns.get(botId);
     if (!t) return null;
-    const ref = t.tools.find((r) => !r.claimed && !r.done && r.name === name);
+    // Names are compared without case: the engine may report a name folded differently from how it calls it.
+    const ref = t.tools.find((r) => !r.claimed && !r.done && r.name.toLowerCase() === name.toLowerCase());
     if (ref) { ref.claimed = true; return ref.seq; }
     if (Date.now() > deadline) return null;
     await sleep(40);
@@ -150,7 +151,7 @@ const pendingApprovals = (botId: string) => db.prepare("SELECT * FROM approvals 
 /** Put an approval card in the conversation and wait for the user's answer. */
 export async function requestApproval(
   who: { userId: string; botId: string },
-  pol: { key: string; toolkit?: string; title: string },
+  pol: Policy,
   args: any,
   rowSeq: number | null,
 ): Promise<ApprovalDecision> {
@@ -159,12 +160,13 @@ export async function requestApproval(
   const tk = pol.toolkit ? await toolkitInfo(pol.toolkit).catch(() => undefined) : undefined;
   const card = appendRow(botId, 'card', {
     type: 'card', card: 'approval', approvalId, title: `Allow ${getBotRow(botId).name} to ${pol.title.split(': ')[1] ?? pol.title}?`,
-    detail: describeArgs(args), tool: pol.key, toolkit: pol.toolkit, toolkitName: tk?.name, logo: tk?.logo, args, status: 'pending',
+    detail: describeArgs(args, pol.asks), tool: pol.key, tools: pol.asks, toolkit: pol.toolkit, toolkitName: tk?.name, logo: tk?.logo, args, status: 'pending',
   });
-  db.prepare('INSERT INTO approvals(id,bot_id,row_seq,call_id,tool,status,created_at) VALUES (?,?,?,?,?,?,?)').run(approvalId, botId, card.seq, '', pol.key, 'pending', now());
+  // `tools` is what the card lists, and so all that "Always allow" on it may store a policy for.
+  db.prepare('INSERT INTO approvals(id,bot_id,row_seq,call_id,tool,tools,status,created_at) VALUES (?,?,?,?,?,?,?,?)').run(approvalId, botId, card.seq, '', pol.key, JSON.stringify(pol.asks), 'pending', now());
   db.prepare('UPDATE bots SET unread = unread + 1 WHERE id=?').run(botId);
   if (rowSeq !== null) patchToolRow(botId, rowSeq, { status: 'awaiting-approval' });
-  setLive(botId, { isRunning: false, activity: { kind: 'waiting_for_you', since: now() }, awaiting: { reason: humanizeSlug(pol.key), since: now() } });
+  setLive(botId, { isRunning: false, activity: { kind: 'waiting_for_you', since: now() }, awaiting: { reason: pol.asks.length > 1 ? pol.title : humanizeSlug(pol.key), since: now() } });
   hub.emit(userId, { type: 'tasks', botId });
   emitBot(botId);
 
@@ -213,18 +215,30 @@ export function resolveApproval(userId: string, approvalId: string, decision: 'a
   if (ap.status !== 'pending') return;
   const waiter = waiters.get(approvalId);
   if (!waiter) return expireApproval(approvalId);
-  const status = decision === 'deny' ? 'denied' : decision === 'always' ? 'always' : 'allowed';
+  // "Always allow" covers the tools the card listed and nothing else in the call. A card that listed
+  // none (a batch that could not be read) has nothing to remember, so it counts as allowed this once.
+  let listed: string[] = [];
+  try { listed = (JSON.parse(ap.tools ?? '[]') as unknown[]).filter((t): t is string => typeof t === 'string'); } catch { /* nothing listed */ }
+  const status = decision === 'deny' ? 'denied' : decision === 'always' && listed.length ? 'always' : 'allowed';
   db.prepare('UPDATE approvals SET status=?, resolved_at=? WHERE id=?').run(status, now(), approvalId);
-  if (decision === 'always') db.prepare("INSERT OR REPLACE INTO policies(user_id,tool,mode) VALUES (?,?,'always_allow')").run(userId, ap.tool);
+  if (status === 'always') for (const tool of listed) db.prepare("INSERT OR REPLACE INTO policies(user_id,tool,mode) VALUES (?,?,'always_allow')").run(userId, tool);
   setApprovalCard(ap.bot_id, ap.row_seq, approvalId, status);
   waiter.resolve(decision === 'deny' ? 'deny' : 'allow');
 }
 
-function describeArgs(args: any): string {
+/** The simple fields of one action's arguments, a line each. */
+const fieldsOf = (a: any) => Object.entries(a && typeof a === 'object' ? a : {}).filter(([, v]) => typeof v !== 'object' || v === null).slice(0, 6).map(([k, v]) => `${k}: ${String(v).slice(0, 160)}`).join('\n');
+
+/** What the card shows under its title: the arguments, and for a batch each action asked about under its own name. */
+function describeArgs(args: any, asks: string[]): string {
   if (!args || typeof args !== 'object') return '';
-  const inner = Array.isArray(args.tools) ? args.tools.map((t: any) => t.arguments ?? t.args ?? t) : [args];
-  const flat = inner.map((a: any) => Object.entries(a ?? {}).filter(([, v]) => typeof v !== 'object' || v === null).slice(0, 6).map(([k, v]) => `${k}: ${String(v).slice(0, 160)}`).join('\n'));
-  return flat.join('\n\n').slice(0, 1200);
+  const batch = batchActions(args).actions;
+  if (!batch.length) return fieldsOf(args).slice(0, 1200);
+  // Actions that need no approval are left out, so the card is about what the user is deciding. With
+  // nothing listed (a batch that could not be read) everything found is shown.
+  const shown = asks.length ? batch.filter((a) => asks.includes(a.slug)) : batch;
+  const many = shown.length > 1;
+  return shown.map((a) => [many ? humanizeSlug(a.slug) : '', fieldsOf(a.args)].filter(Boolean).join('\n')).filter(Boolean).join('\n\n').slice(0, 1200);
 }
 
 // ---------- the engine's event stream ----------

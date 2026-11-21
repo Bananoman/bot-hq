@@ -30,7 +30,10 @@ export function ApprovalCard({ body }: { body: Card<'approval'> }) {
   const { busy, error, run } = useBusy();
   const pending = body.status === 'pending';
   const decide = (d: 'allow' | 'always' | 'deny') => run(d, () => api.approve(body.approvalId, d));
-  const name = body.toolkit ? humanizeToolkit(body.toolkit) : prettyTool(body.tool);
+  // A card can ask about several actions at once (a batch). They are all listed, because "Always allow" covers each of them.
+  const tools = body.tools ?? [body.tool];
+  const many = tools.length > 1;
+  const name = body.toolkit ? humanizeToolkit(body.toolkit) : many ? 'Connected apps' : prettyTool(body.tool);
   return (
     <div className={`card approval-card${pending ? '' : ' is-resolved'}`}>
       <div className="card__head">
@@ -40,12 +43,14 @@ export function ApprovalCard({ body }: { body: Card<'approval'> }) {
           <div className="card__sub">{name}</div>
         </div>
       </div>
+      {many && <div className="card__body">{tools.map((t) => `• ${prettyTool(t)}`).join('\n')}</div>}
       {body.detail && <div className="card__body">{body.detail}</div>}
       {pending ? (
         <>
           <div className="card__actions">
             <button type="button" className="btn btn--secondary" disabled={!!busy} onClick={() => decide('deny')}>Don't allow</button>
-            <button type="button" className="btn btn--secondary" disabled={!!busy} onClick={() => decide('always')}>Always allow</button>
+            {/* Nothing listed (a batch that could not be read): there is nothing "always" could apply to. */}
+            {tools.length > 0 && <button type="button" className="btn btn--secondary" disabled={!!busy} onClick={() => decide('always')}>{many ? 'Always allow all' : 'Always allow'}</button>}
             <button type="button" className="btn btn--primary" disabled={!!busy} onClick={() => decide('allow')}>Allow</button>
           </div>
           {error && <div className="card__error">{error}</div>}

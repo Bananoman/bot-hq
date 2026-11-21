@@ -20,4 +20,4 @@ Every bot is an AI agent with a shell, a browser and your connected apps on a sh
 - **Use computer-scoped Orgo keys**, limited to the one computer the bots use, rather than account-wide keys that can create, read or delete every computer in your account.
 - **Never show keys on screen or in recordings.** Hide `.env` files, terminals and dashboards before you stream, record or share your screen; a key that has been on screen should be rotated.
 - **Rotate a key as soon as it may have leaked.** Deleting it from a file or from git history is not enough once it has been public.
-- **Connect only the apps a bot needs**, and keep approvals on for actions that send, post or delete.
+- **Connect only the apps a bot needs**, and think before choosing "Always allow": it lets every bot of yours repeat that action without asking, and for Composio's sandbox tools it covers any code, which can reach all your connected apps.

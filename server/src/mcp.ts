@@ -59,7 +59,9 @@ async function callTool(botId: string | null, rawName: string, args: any): Promi
   const bot = botId ? getBotRow(botId) : null;
   if (!botId || !bot) return text('The team app has no bot for this agent yet. Ask the user to open the app once, then try again.', true);
   const userId: string = bot.user_id;
-  const name = [...toolMap.keys()].find((k) => k.toLowerCase() === rawName.toLowerCase()) ?? rawName;
+  // The app's own tools by their exact name; everything else goes to Composio, whose names are upper
+  // case. One spelling for the approval check and for the call keeps the two from disagreeing.
+  const name = [...toolMap.keys()].find((k) => k.toLowerCase() === rawName.toLowerCase()) ?? rawName.toUpperCase();
   const rowSeq = await claimToolRow(botId, name);
   const ctx: ToolCtx = { userId, botId, enqueueBotMessage, depth: turnDepth(botId) };
   try {

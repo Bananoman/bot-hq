@@ -89,6 +89,8 @@ export type CardBody =
       title: string;
       detail: string;
       tool: string;
+      /** Every tool this card asks about; "Always allow" covers exactly these. Absent on older cards. */
+      tools?: string[];
       toolkit?: string;
       toolkitName?: string;
       logo?: string;

@@ -111,18 +111,42 @@ export async function executeComposio(userId: string, name: string, args: Record
   return r as { data?: unknown; error?: unknown; resultType?: string; logId?: string };
 }
 
-/** Which inner tool slugs a Composio meta-tool call would run (for approval checks). */
-export function innerToolSlugs(name: string, args: any): string[] {
-  if (name === 'COMPOSIO_MULTI_EXECUTE_TOOL') {
-    const list = args?.tools ?? args?.tool_calls ?? args?.actions ?? [];
-    return (Array.isArray(list) ? list : []).map((t: any) => String(t.tool_slug ?? t.slug ?? t.name ?? t.tool ?? '')).filter(Boolean);
-  }
-  if (name.startsWith('COMPOSIO_')) return [];
-  return [name];
-}
+// ---------- what a tool call would do (for approvals, see policyFor in agent/tools.ts) ----------
 
-const READ_RE = /_(GET|LIST|SEARCH|FETCH|FIND|READ|RETRIEVE|QUERY|LOOKUP|CHECK|DESCRIBE|VIEW|COUNT)(_|$)/;
-export const isReadOnlySlug = (slug: string) => READ_RE.test(slug.toUpperCase());
+/** The meta tool that runs a batch of app actions. Each action in the batch is checked on its own. */
+export const MULTI_EXECUTE = 'COMPOSIO_MULTI_EXECUTE_TOOL';
+
+/**
+ * Composio meta tools that run without asking, because they only look things up in Composio's
+ * catalog and cannot act on a user's apps. This list is the only thing that is allowed by default:
+ * every app action and every other COMPOSIO_* tool asks first (a name saying "GET" or "LIST" proves
+ * nothing about what an action does).
+ */
+export const LOOKUP_META_TOOLS: ReadonlySet<string> = new Set([
+  'COMPOSIO_SEARCH_TOOLS',     // finds the tools for a task: slugs, a suggested plan, which apps are connected
+  'COMPOSIO_GET_TOOL_SCHEMAS', // returns the input schemas of the tools it is given
+]);
+
+/** Meta tools that run code in Composio's sandbox, where any connected app can be called from the code. */
+export const SANDBOX_META_TOOLS: ReadonlySet<string> = new Set(['COMPOSIO_REMOTE_WORKBENCH', 'COMPOSIO_REMOTE_BASH_TOOL']);
+
+/**
+ * The app actions a multi-execute call names, in order, each with its arguments. `complete` is
+ * false when the call has no list of actions or an entry whose action cannot be read, so the
+ * caller must not treat the list as everything the call would do. Every spelling of the list and
+ * of the slug field is read: finding too many actions only means asking about more.
+ */
+export function batchActions(args: any): { actions: { slug: string; args: unknown }[]; complete: boolean } {
+  const lists = [args?.tools, args?.tool_calls, args?.actions].filter(Array.isArray) as any[][];
+  const actions: { slug: string; args: unknown }[] = [];
+  let complete = lists.length > 0 && lists.some((l) => l.length > 0);
+  for (const item of lists.flat()) {
+    const slugs = [item?.tool_slug, item?.slug, item?.name, item?.tool].filter((v): v is string => typeof v === 'string' && !!v.trim());
+    if (!slugs.length) { complete = false; continue; }
+    for (const slug of new Set(slugs.map((v) => v.trim().toUpperCase()))) actions.push({ slug, args: item.arguments ?? item.args });
+  }
+  return { actions, complete };
+}
 
 // ---------- sign-in via Composio-managed Google (Gmail) connection ----------
 // The connection is made under a throwaway user id and deleted once the address is read (routes.ts):

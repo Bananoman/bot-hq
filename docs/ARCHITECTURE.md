@@ -54,8 +54,9 @@ The model's own history is Hermes' business; the app keeps only what it shows.
 
 Approvals happen inside the MCP call, so they work the same for every engine:
 
-- Composio tools that only read run at once.
-- Anything else posts an **approval card** and the tool call waits. **Allow** runs it once, **Always allow** stores a per-tool policy, **Don't allow** returns a refusal that tells the agent not to retry.
+- Only Composio's two lookup tools run at once (`COMPOSIO_SEARCH_TOOLS`, `COMPOSIO_GET_TOOL_SCHEMAS`; the list is `LOOKUP_META_TOOLS` in `composio.ts`). They search Composio's catalog and cannot act on an app.
+- Every app action, reads included, posts an **approval card** and the tool call waits, and so do the sandbox tools (`COMPOSIO_REMOTE_WORKBENCH`, `COMPOSIO_REMOTE_BASH_TOOL`) and any other `COMPOSIO_*` tool. An action's name is not taken as evidence of what it does. **Allow** runs it once, **Always allow** stores a per-tool policy that is honoured from then on, **Don't allow** returns a refusal that tells the agent not to retry.
+- A batch (`COMPOSIO_MULTI_EXECUTE_TOOL`) gets one card that lists every action in it that needs approval; **Always allow all** stores a policy for exactly those. One blocked action refuses the whole batch. A batch whose actions cannot all be read asks as a whole and nothing is stored.
 - A new user message, or no answer in time, closes the card and the call returns "skipped".
 
 Not covered: what a Bot does through its browser or shell, and Hermes' own prompts for risky commands.

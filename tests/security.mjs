@@ -5,7 +5,7 @@
 // Nothing is sent off this machine: Composio is a stand-in served by this script and Hermes points
 // at a closed local port. A few steps have the server listen on this machine's network address for
 // a moment, to act as another device.
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -53,7 +53,7 @@ const needLan = () => LAN ?? skip('this machine has no network address besides l
 
 // ---------- a stand-in for Composio: just enough of its API for Google sign-in ----------
 
-const composio = { email: '', failProfile: false, failDelete: false, sessions: [], links: [], deleted: [], other: [] };
+const composio = { email: '', failProfile: false, failDelete: false, sessions: [], links: [], deleted: [], executed: [], other: [] };
 const composioServer = http.createServer((q, res) => {
   let raw = '';
   q.on('data', (d) => { raw += d; });
@@ -78,6 +78,11 @@ const composioServer = http.createServer((q, res) => {
       composio.deleted.push(p.split('/').pop());
       return answer(200, { success: true });
     }
+    // A tool call that got as far as Composio (it was allowed). Nothing is done; the call is only written down.
+    if (q.method === 'POST' && /\/tool_router\/session\/[^/]+\/execute$/.test(p)) {
+      composio.executed.push(body.tool_slug);
+      return answer(200, { data: { ok: true }, error: null, log_id: `log_${composio.executed.length}`, result_type: 'completed' });
+    }
     // What a turn asks before it starts: which apps the user has connected (none).
     if (q.method === 'GET' && /\/connected_accounts$/.test(p)) return answer(200, { items: [], next_cursor: null, total_pages: 1, current_page: 1, total_items: 0 });
     composio.other.push(`${q.method} ${p}`);
@@ -95,24 +100,23 @@ let child = null;
 let log = '';
 /** Hosts the server tried to reach outside this machine, over all its runs (each attempt was blocked). */
 const blocked = new Set();
+// A clean environment: none of the caller's keys, and HOME in the temp folder so no real Hermes home is read.
+const serverEnv = (extra) => ({
+  PATH: process.env.PATH ?? '', HOME: TMP, NODE_ENV: 'test', TELEMETRY_DISABLED: 'true',
+  PORT: String(PORT), HOST: '127.0.0.1', SESSION_SECRET: SECRET, DB_PATH: path.join(TMP, 'hq.db'),
+  XAI_API_KEY: 'test-not-a-key', COMPOSIO_API_KEY: 'test-not-a-key', COMPOSIO_BASE_URL: COMPOSIO, ORGO_API_KEY: 'test-not-a-key',
+  HERMES_URL: DEAD, HERMES_HOME_PRIMARY: path.join(TMP, 'hermes'), HERMES_BIN: path.join(TMP, 'no-hermes'),
+  ENGINES_DIR: path.join(TMP, 'engines'), ENGINE_PORT_BASE: String(ENGINE_PORT_BASE), MAX_BOTS: '20', BOTHQ_NO_SCHEDULER: '1',
+  ...extra,
+});
+// no-outbound.mjs fails any connection the server's code makes to another machine and names it on stderr.
+const GUARD = ['--import', path.join(ROOT, 'tests/no-outbound.mjs')];
+
 /** (Re)start the server with these settings on top of the throwaway defaults. `reach` is where to wait for it. */
 async function start(extra, reach = BASE) {
   await stop();
   log = '';
-  // no-outbound.mjs fails any connection the server makes to another machine and names it on stderr.
-  child = spawn(process.execPath, ['--import', path.join(ROOT, 'tests/no-outbound.mjs'), ENTRY], {
-    cwd: path.join(ROOT, 'server'),
-    stdio: ['ignore', 'pipe', 'pipe'],
-    // A clean environment: none of the caller's keys, and HOME in the temp folder so no real Hermes home is read.
-    env: {
-      PATH: process.env.PATH ?? '', HOME: TMP, NODE_ENV: 'test', TELEMETRY_DISABLED: 'true',
-      PORT: String(PORT), HOST: '127.0.0.1', SESSION_SECRET: SECRET, DB_PATH: path.join(TMP, 'hq.db'),
-      XAI_API_KEY: 'test-not-a-key', COMPOSIO_API_KEY: 'test-not-a-key', COMPOSIO_BASE_URL: COMPOSIO, ORGO_API_KEY: 'test-not-a-key',
-      HERMES_URL: DEAD, HERMES_HOME_PRIMARY: path.join(TMP, 'hermes'), HERMES_BIN: path.join(TMP, 'no-hermes'),
-      ENGINES_DIR: path.join(TMP, 'engines'), ENGINE_PORT_BASE: String(ENGINE_PORT_BASE), MAX_BOTS: '20', BOTHQ_NO_SCHEDULER: '1',
-      ...extra,
-    },
-  });
+  child = spawn(process.execPath, [...GUARD, ENTRY], { cwd: path.join(ROOT, 'server'), stdio: ['ignore', 'pipe', 'pipe'], env: serverEnv(extra) });
   child.stdout.on('data', (d) => { log += d; });
   child.stderr.on('data', (d) => { log += d; for (const m of String(d).matchAll(/\[no-outbound\] blocked a connection to (\S+)/g)) blocked.add(m[1]); });
   const mine = child;
@@ -181,6 +185,19 @@ async function until(fn, what, ms = 6000) {
   for (const t0 = Date.now(); Date.now() - t0 < ms; await sleep(200)) { const v = await fn(); if (v) return v; }
   throw new Error(`timed out waiting for ${what}`);
 }
+
+/**
+ * What the server's policyFor decides for each `[toolName, args]`, asked of the built code itself
+ * (tests/policy-probe.mjs) for the account `email`, with `policies` ([tool, mode]) stored meanwhile.
+ */
+function decide(email, cases, policies = []) {
+  const run = spawnSync(process.execPath, [...GUARD, path.join(ROOT, 'tests/policy-probe.mjs'), JSON.stringify({ email, cases, policies })], { cwd: path.join(ROOT, 'server'), env: serverEnv(LOCAL), encoding: 'utf8' });
+  const line = run.stdout.split('\n').find((l) => l.startsWith('ANSWERS '));
+  if (!line) throw new Error(`policy probe failed: ${run.stderr.trim().split('\n').pop()}`);
+  return JSON.parse(line.slice(8));
+}
+/** "ask GMAIL_SEND_EMAIL" style summary of one decision: what was decided and what the card would list. */
+const said = (p) => [p.decision, ...(p.decision === 'block' ? [p.key] : p.asks)].join(' ');
 
 async function devLogin(email) {
   const res = await req('/api/auth/dev', { body: { email } });
@@ -443,14 +460,114 @@ try {
       eq(left.length, 2, 'attempts left (the recent one and the one just started)');
     } finally { db.close(); }
   });
+
+  // ---------- I: app actions ask first; only a named few lookup tools run on their own ----------
+
+  const batch = (...slugs) => ({ tools: slugs.map((tool_slug) => ({ tool_slug, arguments: { id: '1' } })) });
+  await step('a slug that merely sounds read-only asks (GMAIL_GET_PROFILE, and inside a batch)', async () => {
+    const [direct, inBatch, lower] = decide(STALE, [['GMAIL_GET_PROFILE', {}], ['COMPOSIO_MULTI_EXECUTE_TOOL', batch('GMAIL_FETCH_EMAILS', 'GITHUB_LIST_REPOS')], ['gmail_get_profile', {}]]);
+    eq(said(direct), 'ask GMAIL_GET_PROFILE', 'direct call');
+    eq(said(inBatch), 'ask GMAIL_FETCH_EMAILS GITHUB_LIST_REPOS', 'batch');
+    eq(said(lower), 'ask GMAIL_GET_PROFILE', 'lower-case spelling');
+  });
+  await step('a COMPOSIO_ tool nobody listed asks; the two lookup tools run', async () => {
+    const [unknown, proxy, search, schemas, searchLower] = decide(STALE, [['COMPOSIO_FOO', {}], ['COMPOSIO_PROXY_EXECUTE', { endpoint: '/x' }], ['COMPOSIO_SEARCH_TOOLS', {}], ['COMPOSIO_GET_TOOL_SCHEMAS', {}], ['composio_search_tools', {}]]);
+    eq(said(unknown), 'ask COMPOSIO_FOO', 'COMPOSIO_FOO');
+    eq(said(proxy), 'ask COMPOSIO_PROXY_EXECUTE', 'COMPOSIO_PROXY_EXECUTE');
+    eq(said(search), 'allow', 'COMPOSIO_SEARCH_TOOLS');
+    eq(said(schemas), 'allow', 'COMPOSIO_GET_TOOL_SCHEMAS');
+    eq(said(searchLower), 'allow', 'composio_search_tools');
+  });
+  await step('sandbox code asks whatever it looks like (the word composio hidden by joining strings, or plain ls)', async () => {
+    const hidden = { code_to_execute: "f = globals()['run_' + 'comp' + 'osio_tool']\nf('GMAIL_SEND_EMAIL', {'to': 'x@example.test'})" };
+    const [workbench, bash] = decide(STALE, [['COMPOSIO_REMOTE_WORKBENCH', hidden], ['COMPOSIO_REMOTE_BASH_TOOL', { command: 'ls' }]]);
+    eq(said(workbench), 'ask COMPOSIO_REMOTE_WORKBENCH', 'workbench');
+    eq(said(bash), 'ask COMPOSIO_REMOTE_BASH_TOOL', 'bash');
+    // The user's own stored choice for the tool still decides.
+    const [allowed, refused] = decide(STALE, [['COMPOSIO_REMOTE_WORKBENCH', hidden], ['COMPOSIO_REMOTE_BASH_TOOL', { command: 'ls' }]], [['COMPOSIO_REMOTE_WORKBENCH', 'always_allow'], ['COMPOSIO_REMOTE_BASH_TOOL', 'blocked']]);
+    eq(said(allowed), 'allow', 'workbench with always_allow stored');
+    eq(said(refused), 'block COMPOSIO_REMOTE_BASH_TOOL', 'bash with blocked stored');
+  });
+  await step('a batch asks about every action that needs it: a draft and a delete are both listed', async () => {
+    const [both] = decide(STALE, [['COMPOSIO_MULTI_EXECUTE_TOOL', batch('GMAIL_CREATE_EMAIL_DRAFT', 'GMAIL_DELETE_MESSAGE')]]);
+    eq(said(both), 'ask GMAIL_CREATE_EMAIL_DRAFT GMAIL_DELETE_MESSAGE', 'draft + delete');
+    eq(both.title, 'Apps: run 2 actions', 'title');
+  });
+  await step('stored policies still decide: always_allow is honoured, one blocked action blocks the batch', async () => {
+    const stored = [['GMAIL_FETCH_EMAILS', 'always_allow'], ['GMAIL_DELETE_MESSAGE', 'blocked']];
+    const [alone, withMore, withBlocked] = decide(STALE, [
+      ['COMPOSIO_MULTI_EXECUTE_TOOL', batch('GMAIL_FETCH_EMAILS')],
+      ['COMPOSIO_MULTI_EXECUTE_TOOL', batch('GMAIL_FETCH_EMAILS', 'GMAIL_SEND_EMAIL')],
+      ['COMPOSIO_MULTI_EXECUTE_TOOL', batch('GMAIL_FETCH_EMAILS', 'GMAIL_DELETE_MESSAGE')],
+    ], stored);
+    eq(said(alone), 'allow', 'only the allowed action');
+    eq(said(withMore), 'ask GMAIL_SEND_EMAIL', 'allowed action plus another');
+    eq(said(withBlocked), 'block GMAIL_DELETE_MESSAGE', 'allowed action plus a blocked one');
+  });
+  await step('a batch that cannot be read in full asks as a whole and offers nothing to remember', async () => {
+    const answers = decide(STALE, [
+      ['COMPOSIO_MULTI_EXECUTE_TOOL', {}],
+      ['COMPOSIO_MULTI_EXECUTE_TOOL', { tools: [] }],
+      ['COMPOSIO_MULTI_EXECUTE_TOOL', { tools: [{ tool_slug: 'GMAIL_FETCH_EMAILS' }, { toolSlug: 'GMAIL_SEND_EMAIL' }] }],
+      ['COMPOSIO_MULTI_EXECUTE_TOOL', batch('COMPOSIO_MULTI_EXECUTE_TOOL')],
+      ['Composio_Multi_Execute_Tool', batch('COMPOSIO_MULTI_EXECUTE_TOOL')],
+    ], [['COMPOSIO_MULTI_EXECUTE_TOOL', 'always_allow'], ['GMAIL_FETCH_EMAILS', 'always_allow']]);
+    eq(answers.map(said).join(' | '), 'ask | ask | ask | ask | ask', 'no list, empty list, unreadable entry, batch in a batch, other spelling');
+  });
+
+  // The same through the door the agents use, with the card the user sees and what "Always allow" stores.
+  await start(LOCAL);
+  const agentBot = async (cookie) => (await (await req('/api/bots', { cookie })).json()).bots.find((b) => b.isPrimary).id;
+  const pendingCard = async (cookie, botId) => (await (await req(`/api/bots/${botId}/rows`, { cookie })).json()).rows.map((r) => r.body).find((b) => b.card === 'approval' && b.status === 'pending');
+  const policiesOf = async (cookie) => (await (await req('/api/policies', { cookie })).json()).policies.map((p) => `${p.tool}=${p.mode}`).sort().join(' ');
+  const answerCard = (cookie, card, decision) => req(`/api/approvals/${card.approvalId}`, { cookie, body: { decision } });
+  await step('batch card lists both actions; "Always allow" stores exactly those; then the batch runs unasked', async () => {
+    const bot = await agentBot(cookies.listed);
+    const call = tool(bot, 'COMPOSIO_MULTI_EXECUTE_TOOL', batch('GMAIL_CREATE_EMAIL_DRAFT', 'GMAIL_DELETE_MESSAGE'));
+    const card = await until(() => pendingCard(cookies.listed, bot), 'the approval card');
+    eq(card.tools.join(' '), 'GMAIL_CREATE_EMAIL_DRAFT GMAIL_DELETE_MESSAGE', 'actions on the card');
+    if (!/run 2 actions\?$/.test(card.title)) throw new Error(`card title: ${card.title}`);
+    if (!card.detail.includes('Gmail: create email draft') || !card.detail.includes('Gmail: delete message')) throw new Error(`card detail does not name both actions: ${card.detail}`);
+    eq(composio.executed.length, 0, 'calls that reached Composio while the card was open');
+    eq((await answerCard(cookies.listed, card, 'always')).status, 200, 'answering the card');
+    await call;
+    eq(composio.executed.join(' '), 'COMPOSIO_MULTI_EXECUTE_TOOL', 'calls that reached Composio');
+    eq(await policiesOf(cookies.listed), 'GMAIL_CREATE_EMAIL_DRAFT=always_allow GMAIL_DELETE_MESSAGE=always_allow', 'stored policies');
+    await tool(bot, 'COMPOSIO_MULTI_EXECUTE_TOOL', batch('GMAIL_DELETE_MESSAGE', 'GMAIL_CREATE_EMAIL_DRAFT'));
+    eq(composio.executed.length, 2, 'calls that reached Composio after the second, unasked batch');
+  });
+  await step('a new action in the batch asks for that one only; "Don\'t allow" runs nothing and stores nothing', async () => {
+    const bot = await agentBot(cookies.listed);
+    const call = tool(bot, 'COMPOSIO_MULTI_EXECUTE_TOOL', batch('GMAIL_CREATE_EMAIL_DRAFT', 'GMAIL_SEND_EMAIL'));
+    const card = await until(() => pendingCard(cookies.listed, bot), 'the approval card');
+    eq(card.tools.join(' '), 'GMAIL_SEND_EMAIL', 'actions on the card');
+    await answerCard(cookies.listed, card, 'deny');
+    if (!(await call).startsWith('The user declined')) throw new Error('the agent was not told the action was declined');
+    eq(composio.executed.length, 2, 'calls that reached Composio');
+    eq(await policiesOf(cookies.listed), 'GMAIL_CREATE_EMAIL_DRAFT=always_allow GMAIL_DELETE_MESSAGE=always_allow', 'stored policies');
+  });
+  await step('sandbox code waits for a card; a lookup tool goes straight through', async () => {
+    const bot = await agentBot(cookies.listed);
+    const call = tool(bot, 'composio_remote_workbench', { code_to_execute: "print('hi')" });
+    const card = await until(() => pendingCard(cookies.listed, bot), 'the approval card');
+    eq(card.tools.join(' '), 'COMPOSIO_REMOTE_WORKBENCH', 'tool on the card');
+    await answerCard(cookies.listed, card, 'deny');
+    await call;
+    eq(composio.executed.length, 2, 'calls that reached Composio');
+    await tool(bot, 'COMPOSIO_SEARCH_TOOLS', { queries: [{ use_case: 'send an email' }] });
+    eq(composio.executed.at(-1), 'COMPOSIO_SEARCH_TOOLS', 'last call that reached Composio');
+  });
 } finally {
   await stop();
   composioServer.close();
   fs.rmSync(TMP, { recursive: true, force: true });
 }
 
-await step('the server reached for nothing outside this machine but the Composio SDK\'s version check', async () => {
-  eq([...blocked].filter((h) => h !== 'registry.npmjs.org').join(', '), '', 'other hosts it tried (all blocked)');
+// Two things the server reaches for on its own, both blocked here: the Composio SDK's version check
+// at start, and Composio's app catalog for the name and logo on an approval card.
+const EXPECTED_BLOCKED = ['registry.npmjs.org', 'backend.composio.dev'];
+await step('the server reached for nothing outside this machine but the Composio version check and app catalog', async () => {
+  eq([...blocked].filter((h) => !EXPECTED_BLOCKED.includes(h)).join(', '), '', 'other hosts it tried (all blocked)');
 });
 console.log(`   blocked outbound connections: ${[...blocked].join(', ') || 'none'}`);
 
