@@ -557,6 +557,56 @@ try {
     await tool(bot, 'COMPOSIO_SEARCH_TOOLS', { queries: [{ use_case: 'send an email' }] });
     eq(composio.executed.at(-1), 'COMPOSIO_SEARCH_TOOLS', 'last call that reached Composio');
   });
+
+  // ---------- J: the computer's own agent (the primary engine) goes to the owner's account only ----------
+
+  const BOSS = 'boss@example.test';
+  const EARLY = 'early@example.test';
+  // The engine panel names the agent a bot runs on: 'default' is the one that already lives on the computer.
+  const engineOf = async (cookie, botId) => ((await (await req(`/api/bots/${botId}/engine`, { cookie })).json()).engine.profile === 'default' ? 'primary' : 'own');
+  const ownerSignIn = async (email) => sessionOf(await req('/api/auth/owner', { headers: asOwner, body: { email } }));
+  const newBot = async (cookie, name) => (await (await req('/api/bots', { cookie, body: { name } })).json()).bot.id;
+  const ownerDb = path.join(TMP, 'owner.db');
+  await start({ ...PUBLIC, ALLOWED_EMAILS: `${BOSS},${EARLY}`, OWNER_EMAIL: 'Boss@Example.test', DB_PATH: ownerDb });
+  let boss, early, bossBot;
+  await step('the first account to arrive is not the owner: its bot gets an agent of its own', async () => {
+    early = await ownerSignIn(EARLY);
+    eq(await engineOf(early, await agentBot(early)), 'own', 'first bot on the instance');
+  });
+  await step('the owner arrives later and its bot is the computer\'s own agent', async () => {
+    boss = await ownerSignIn(BOSS);
+    bossBot = await agentBot(boss);
+    eq(await engineOf(boss, bossBot), 'primary', 'owner\'s bot');
+    eq(await engineOf(boss, await newBot(boss, 'Second')), 'own', 'owner\'s second bot');
+  });
+  await step('with that bot gone, the next bot of someone else does not inherit the agent; the owner\'s next one does', async () => {
+    // Removed in the database, which is all the delete route does to the binding; the route itself
+    // would also reach for the computer to clean up the bot's files.
+    const db = new Database(ownerDb);
+    try { db.prepare('DELETE FROM bots WHERE id=?').run(bossBot); } finally { db.close(); }
+    eq(await engineOf(early, await newBot(early, 'Hopeful')), 'own', 'next bot of another account');
+    eq(await engineOf(boss, await newBot(boss, 'Again')), 'primary', 'next bot of the owner');
+  });
+  await start({ ...PUBLIC, ALLOWED_EMAILS: EARLY, DB_PATH: path.join(TMP, 'no-owner.db') });
+  await step('public URL without OWNER_EMAIL: nobody gets the computer\'s own agent, and the start-up log says so', async () => {
+    const c = await ownerSignIn(EARLY);
+    eq(await engineOf(c, await agentBot(c)), 'own', 'first bot on the instance');
+    if (!log.includes('[env] OWNER_EMAIL is not set')) throw new Error('no start-up warning about OWNER_EMAIL');
+  });
+  // The main database of this run: made as a local app, where the first account (not an owner) got the agent.
+  await start({ ...PUBLIC, ALLOWED_EMAILS: LISTED, OWNER_EMAIL: LISTED });
+  await step('upgrade with the agent already bound to another account: left as it is, with a warning at start', async () => {
+    eq(await engineOf(cookies.staleByOwner, await agentBot(cookies.staleByOwner)), 'primary', `${STALE}'s bot`);
+    const warning = log.split('\n').find((l) => l.startsWith('[engine] The computer\'s own agent')) ?? '';
+    if (!warning.includes(STALE) || !warning.includes('Nothing was changed')) throw new Error(`start-up warning: ${warning || '(none)'}`);
+    // And the owner does not get a second binding while that one stands.
+    eq(await engineOf(cookies.listed, await newBot(cookies.listed, 'Mine')), 'own', 'a new bot of the owner');
+  });
+  await start(LOCAL);
+  await step('local app without OWNER_EMAIL: as before, no warning', async () => {
+    eq(await engineOf(cookies.stale, await agentBot(cookies.stale)), 'primary', 'the first account\'s bot');
+    if (log.includes('[engine] The computer\'s own agent') || log.includes('OWNER_EMAIL is not set')) throw new Error('a warning was logged for a local app');
+  });
 } finally {
   await stop();
   composioServer.close();

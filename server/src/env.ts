@@ -111,6 +111,13 @@ export const env = {
    * the list stops working (see routes.ts maySignIn, lib/auth.ts userFromToken).
    */
   allowedEmails: (process.env.ALLOWED_EMAILS ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
+  /**
+   * The account of whoever runs the computer. Only its bots may be bound to the agent that already
+   * lives there (the primary engine: that agent's memory, its messaging, the main screen). Unset =
+   * any account while APP_URL is a local address (development), no account on a public URL (see
+   * engine.ts mayUsePrimary).
+   */
+  ownerEmail: (process.env.OWNER_EMAIL ?? '').trim().toLowerCase(),
 };
 
 if (process.env.DEV_LOGIN === '1' && !env.devLogin) {
@@ -118,4 +125,7 @@ if (process.env.DEV_LOGIN === '1' && !env.devLogin) {
 }
 if (!env.localOnly && !env.allowedEmails.length) {
   console.warn('[env] ALLOWED_EMAILS is empty and APP_URL is public: nobody can sign in with Google, and only sign-ins made with scripts/sign-in-link.sh keep working. Set ALLOWED_EMAILS to let people in.');
+}
+if (!env.localOnly && !env.ownerEmail) {
+  console.warn("[env] OWNER_EMAIL is not set and APP_URL is public: no new bot is bound to the computer's own agent, each gets an agent of its own. Set OWNER_EMAIL to the account that should have it.");
 }

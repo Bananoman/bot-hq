@@ -2,8 +2,11 @@
 # Install or upgrade the app on the Orgo computer that runs Hermes. Run it ON that computer, as root.
 #
 #   PUBLIC_URL=https://<name>.orgo.dev ORGO_COMPUTER_ID=<uuid> ALLOWED_EMAILS=you@example.com \
-#     bash install-on-computer.sh /path/to/hq-app.tgz
+#     OWNER_EMAIL=you@example.com bash install-on-computer.sh /path/to/hq-app.tgz
 #
+# OWNER_EMAIL is the account whose bot is the agent that already runs here (its memory, its messaging,
+# the main screen); everyone else's bots get agents of their own. Left out on a first install, it is
+# the first address in ALLOWED_EMAILS.
 # Optional: PORT (8787), PRIMARY_CDP_URL (DevTools URL of the main agent's own Chrome, if it has one),
 # KEYS_FILE (lines XAI_API_KEY=, COMPOSIO_API_KEY=, ORGO_API_KEY=).
 # ORGO_API_KEY may be left out of KEYS_FILE when Hermes' own .env already has one.
@@ -46,6 +49,7 @@ if [ ! -f "$APP/.env" ]; then
     echo "SESSION_SECRET=$(openssl rand -hex 32)"
     echo "DEV_LOGIN=0"
     echo "ALLOWED_EMAILS=${ALLOWED_EMAILS:-}"
+    echo "OWNER_EMAIL=${OWNER_EMAIL:-${ALLOWED_EMAILS%%,*}}"
     echo "DB_PATH=$DATA/hq.db"
     echo "ENGINES_DIR=$DATA/engines"
     echo "HERMES_BIN=$(command -v hermes || echo /usr/local/bin/hermes)"
@@ -65,6 +69,13 @@ if [ ! -f "$APP/.env" ]; then
   chmod 600 "$APP/.env"
 fi
 [ -z "${KEYS_FILE:-}" ] || rm -f "$KEYS_FILE"
+# A settings file from before OWNER_EMAIL existed gets it when it is given now; nothing is guessed for
+# an install that is already in use (the app says at start-up who holds the main agent).
+if ! grep -q '^OWNER_EMAIL=' "$APP/.env"; then
+  if [ -n "${OWNER_EMAIL:-}" ]; then echo "OWNER_EMAIL=$OWNER_EMAIL" >> "$APP/.env"
+  else echo "note: $APP/.env has no OWNER_EMAIL, so no new bot gets the main agent. Run this again with OWNER_EMAIL=<your address> to set it."; fi
+fi
+echo "owner: $(grep -E '^OWNER_EMAIL=' "$APP/.env" | tail -1 | cut -d= -f2-)"
 
 # 4. Keep it running. Only this one program is added or restarted; nothing else under supervisor is touched.
 cat > /etc/supervisor/conf.d/hq-app.conf <<EOF

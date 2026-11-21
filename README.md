@@ -70,8 +70,8 @@ flowchart LR
   S --> X["xAI<br/>voice · X search"]
 ```
 
-- **One computer, one screen per bot.** All bots live on a single Orgo Linux computer. The first bot uses the computer's main screen; each further bot gets an Orgo screen of its own. Orgo allows four screens per computer, so four bots.
-- **The first bot is the Hermes agent that already runs on that computer.** The app talks to its gateway and never restarts it or rewrites its settings.
+- **One computer, one screen per bot.** All bots live on a single Orgo Linux computer. The owner's first bot uses the computer's main screen; every other bot gets an Orgo screen of its own. Orgo allows four screens per computer, so four bots.
+- **The owner's first bot is the Hermes agent that already runs on that computer.** No other account's bot is ever bound to it. The app talks to its gateway and never restarts it or rewrites its settings.
 - **Every other bot gets its own Hermes home and gateway**, started by the app. Each has its own model, sign-in, memory, browser profile and files.
 - **The app's tools reach Hermes over MCP.** The server exposes `/mcp/<bot>`. Each agent gets connected apps, `x_search`, tasks, routines, the Library, and messages to other bots.
 - **Screens are dressed to look like the bot's own computer**: a light desktop with a dock, and a home screen with the bot's name and apps as Chrome's new tab page.
@@ -101,12 +101,12 @@ The app is meant to run on the same Orgo computer as Hermes.
 3. On the computer, as root:
 
    ```bash
-   PUBLIC_URL=https://<name>.orgo.dev ORGO_COMPUTER_ID=<uuid> ALLOWED_EMAILS=you@example.com \
+   PUBLIC_URL=https://<name>.orgo.dev ORGO_COMPUTER_ID=<uuid> ALLOWED_EMAILS=you@example.com OWNER_EMAIL=you@example.com \
    KEYS_FILE=/root/keys.txt PRIMARY_CDP_URL=http://127.0.0.1:9333 \
      bash install-on-computer.sh hq-app.tgz
    ```
 
-   `KEYS_FILE` holds `XAI_API_KEY=` and `COMPOSIO_API_KEY=` lines (and `ORGO_API_KEY=` if Hermes' own `.env` has none); it is deleted after the first install. `PRIMARY_CDP_URL` is only for a main agent that already has its own Chrome. The script installs to `/opt/hq`, adds one supervisor program (`hq-app`), and leaves Hermes alone. Running it again with a newer `hq-app.tgz` upgrades the app and keeps its settings and data.
+   `KEYS_FILE` holds `XAI_API_KEY=` and `COMPOSIO_API_KEY=` lines (and `ORGO_API_KEY=` if Hermes' own `.env` has none); it is deleted after the first install. `OWNER_EMAIL` is your own account: its first bot is the agent that already runs on the computer, with that agent's memory, messaging and main screen, and nobody else's bot ever is (left out, it is the first address in `ALLOWED_EMAILS`). `PRIMARY_CDP_URL` is only for a main agent that already has its own Chrome. The script installs to `/opt/hq`, adds one supervisor program (`hq-app`), and leaves Hermes alone. Running it again with a newer `hq-app.tgz` upgrades the app and keeps its settings and data.
 4. Give the main agent the app's tools: `python3 /opt/hq/app/scripts/add-hq-to-hermes.py`. It adds one `mcp_servers.hq` entry to Hermes' `config.yaml`, keeps a dated copy of the file, and Hermes picks the change up without a restart. `--remove` takes it out again.
 5. Open the public URL and sign in with Google. If Google sign-in is not set up yet, `bash /opt/hq/app/scripts/sign-in-link.sh you@example.com` on the computer prints a one-time sign-in link.
 
@@ -131,6 +131,7 @@ Then delete the public URL in Orgo. Screens of the other bots are released when 
 Run the install script again with a newer `hq-app.tgz`; settings and data are kept. Two things to know when coming from an older version:
 
 - **Sign-in is stricter.** The server refuses to start with the example `SESSION_SECRET`. On a public URL only addresses in `ALLOWED_EMAILS` can sign in or stay signed in: an empty list lets nobody in, and an account that is not on the list is signed out even if it signed in before. `DEV_LOGIN` only works on `localhost`. `scripts/sign-in-link.sh` still signs anyone in from the computer itself, and that sign-in is kept whatever the list says.
+- **The computer's own agent goes to the owner only.** The first bot anyone created used to be bound to the agent that already runs on the computer. Now only a bot of `OWNER_EMAIL` is. An existing install has no `OWNER_EMAIL` until you run the install script again with `OWNER_EMAIL=<your address>`; until then no new bot gets that agent. A bot that already holds it keeps it, whoever it belongs to, and the server names it in a warning at start-up. Nothing is moved for you: to free the agent, delete that bot from its own account (`scripts/sign-in-link.sh <that address>` signs you in as it), and the owner's next new bot gets it.
 - **Bots ask before every app action.** Actions whose name sounded read-only (get, list, search, fetch and the like) used to run without asking; now each asks the first time, as do Composio's sandbox tools. Choose **Always allow** on the card for the ones you trust. Choices you made before are kept. A routine that runs while nobody is there waits for its card (up to 25 minutes) and is skipped if it is not answered, so allow what your routines use.
 - **`/mcp` and the owner sign-in only answer on the computer itself.** A call has to come from a loopback address and must not have been passed on by a proxy. The defaults already work this way (`MCP_BASE_URL` is `http://127.0.0.1:<port>`, and `scripts/sign-in-link.sh` calls `127.0.0.1`); an agent that reaches `/mcp` through the public URL or from another machine or container is refused with a 403.
 - **The project used to be called "Grokbot".** Old names keep working: `GROKBOT_*` environment variables are read when the `BOTHQ_*` ones are unset, an existing `data/grokbot.db` stays the default database, a computer that has `/root/grokbot` keeps using it for browser profiles and Library files, and old sign-in cookies and browser settings are still read.

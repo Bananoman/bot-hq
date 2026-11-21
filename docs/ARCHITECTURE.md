@@ -27,7 +27,7 @@ browser ── HTTP + SSE ──► server ── POST /v1/responses ──► H
 
 ## The primary engine
 
-The first Bot is bound to a Hermes gateway the app did not start. The rules:
+The first Bot of the owner's account (`OWNER_EMAIL`; any account while the app runs on `localhost` without it) is bound to a Hermes gateway the app did not start. No other account's Bot is ever bound to it, also not after that Bot is deleted. The rules:
 
 - The app never restarts it, stops it, or writes its `config.yaml`. Giving it the app's tools is a separate, explicit step (`scripts/add-hq-to-hermes.py`), which adds one `mcp_servers.hq` entry and keeps a copy of the file. Hermes loads the change without a restart.
 - If that agent already has its own Chrome (`PRIMARY_CDP_URL`), the app never starts, stops or reconfigures it. The home screen still arrives there, through a Chrome policy that installs the home-screen extension.

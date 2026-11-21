@@ -87,12 +87,28 @@ function freePort(): number {
   return p;
 }
 
-/** Give a new agent bot its engine: the existing agent if nobody has it yet, otherwise one of our own. */
+/**
+ * Whether this account's bots may be bound to the primary engine. That agent is the owner's own:
+ * its memory, its messaging accounts and the computer's main screen come with it, so it goes to
+ * OWNER_EMAIL only. Without OWNER_EMAIL any account qualifies while the app is local (development,
+ * where whoever signs in is the developer) and none does on a public URL. How somebody signed in
+ * does not count: the owner key also lets guests in.
+ */
+export function mayUsePrimary(userId: string): boolean {
+  const email = String((db.prepare('SELECT email FROM users WHERE id=?').get(userId) as any)?.email ?? '').toLowerCase();
+  return env.ownerEmail ? email === env.ownerEmail : env.localOnly;
+}
+
+/**
+ * Give a new agent bot its engine: the existing agent if nobody has it and the bot belongs to the
+ * owner, otherwise one of our own. A free primary engine (never bound, or its bot was deleted) so
+ * waits for the owner's next bot instead of going to whoever creates one first.
+ */
 export function assignEngine(botId: string): EngineKind {
   const b = botRow(botId);
   if (!b) throw new Error('bot not found');
   if (b.engine === 'primary' || b.engine === 'managed') return b.engine;
-  if (!primaryBotId()) {
+  if (!primaryBotId() && mayUsePrimary(b.user_id)) {
     db.prepare("UPDATE bots SET engine='primary', engine_port=NULL WHERE id=?").run(botId);
     return 'primary';
   }
@@ -434,6 +450,12 @@ export async function removeEngine(botId: string): Promise<void> {
 /** On server start: give older bots an engine, then bring the managed gateways up. */
 export function initEngines() {
   fs.mkdirSync(env.enginesDir, { recursive: true });
+  // A binding made before the owner rule existed is left alone (moving it would hand one account's
+  // conversation to another agent, or take a bot away). It is only pointed out.
+  const held = db.prepare("SELECT b.name, b.user_id, u.email FROM bots b JOIN users u ON u.id=b.user_id WHERE b.engine='primary'").get() as any;
+  if (held && !mayUsePrimary(held.user_id)) {
+    console.warn(`[engine] The computer's own agent (its memory, messaging and main screen) is bound to "${held.name}", a bot of ${held.email}, ${env.ownerEmail ? `which is not OWNER_EMAIL (${env.ownerEmail})` : 'and OWNER_EMAIL is not set'}. Nothing was changed. To take it back, that bot has to be deleted in the app by its account (scripts/sign-in-link.sh signs you in as it); the owner's next new bot then gets the agent.`);
+  }
   const bots = db.prepare("SELECT id, is_primary FROM bots WHERE engine IS NULL AND COALESCE(kind,'agent') <> 'room' AND COALESCE(hidden,0)=0 ORDER BY is_primary DESC, created_at ASC").all() as any[];
   for (const b of bots) assignEngine(b.id);
   for (const b of db.prepare("SELECT id FROM bots WHERE engine='managed'").all() as any[]) provisionEngine(b.id);
